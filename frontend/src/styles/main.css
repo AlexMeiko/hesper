@@ -1,0 +1,340 @@
+@import "tailwindcss";
+
+:root {
+  --bg-canvas: #ffffff;
+  --bg-surface: #f8fafc;
+  --bg-elevated: #ffffff;
+  --bg-subtle: #f1f5f9;
+  --bg-hover: #e2e8f0;
+  --bg-selected: #eff6ff;
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #dbeafe;
+  --accent-text: #1d4ed8;
+
+  --success: #15803d;
+  --success-soft: #dcfce7;
+  --warning: #b45309;
+  --warning-soft: #fef3c7;
+  --danger: #b91c1c;
+  --danger-soft: #fee2e2;
+
+  --null-bg: #f1f5f9;
+  --null-text: #64748b;
+  --empty-border: #cbd5e1;
+  --empty-text: #94a3b8;
+
+  --env-red: #dc2626;
+  --env-amber: #d97706;
+  --env-green: #16a34a;
+  --env-default: #2563eb;
+
+  --font-sans: 'Inter', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg-canvas: #0f141b;
+  --bg-surface: #151b23;
+  --bg-elevated: #1b232e;
+  --bg-subtle: #1f2937;
+  --bg-hover: #283445;
+  --bg-selected: #172554;
+  --border-subtle: #253041;
+  --border-strong: #37465c;
+
+  --text-primary: #e6edf3;
+  --text-secondary: #a5b4c6;
+  --text-muted: #7d8da1;
+  --text-faint: #58677a;
+
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-soft: rgba(59, 130, 246, 0.18);
+  --accent-text: #93c5fd;
+
+  --success: #4ade80;
+  --success-soft: rgba(34, 197, 94, 0.16);
+  --warning: #fbbf24;
+  --warning-soft: rgba(245, 158, 11, 0.16);
+  --danger: #f87171;
+  --danger-soft: rgba(239, 68, 68, 0.18);
+
+  --null-bg: #1e293b;
+  --null-text: #94a3b8;
+  --empty-border: #334155;
+  --empty-text: #64748b;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-mono-tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Clean desktop scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Buttons & inputs */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.btn:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #ffffff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: transparent;
+  color: var(--text-primary);
+}
+
+.input-field {
+  height: 34px;
+  padding: 0 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border-strong);
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.input-field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.input-field-sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* Override native GTK4/WebKitGTK <select> inner padding so CJK text never clips */
+select.input-field {
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 30px 0 11px;
+  line-height: normal;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 12px 12px;
+  cursor: pointer;
+}
+
+select.select-sm {
+  height: 28px;
+  padding: 0 28px 0 10px;
+  font-size: 12px;
+  line-height: normal;
+  background-position: right 8px center;
+}
+
+select.input-field option {
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+/* Split resizers */
+.splitter-v {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background-color 0.12s ease;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.splitter-v::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 1px;
+  width: 1px;
+  background: var(--border-subtle);
+}
+
+.splitter-v:hover,
+.splitter-v.dragging {
+  background: var(--accent-soft);
+}
+
+.splitter-v:hover::after,
+.splitter-v.dragging::after {
+  background: var(--accent);
+  width: 2px;
+}
+
+.splitter-h {
+  height: 5px;
+  cursor: row-resize;
+  background: transparent;
+  transition: background-color 0.12s ease;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.splitter-h::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.splitter-h:hover,
+.splitter-h.dragging {
+  background: var(--accent-soft);
+}
+
+.splitter-h:hover::after,
+.splitter-h.dragging::after {
+  background: var(--accent);
+  height: 2px;
+}
+
+/* CodeMirror overrides */
+.cm-editor {
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+.cm-gutters {
+  background-color: var(--bg-surface) !important;
+  color: var(--text-faint) !important;
+  border-right: 1px solid var(--border-subtle) !important;
+}
+
+.cm-activeLine {
+  background-color: var(--bg-subtle) !important;
+}
+
+.cm-activeLineGutter {
+  background-color: var(--bg-subtle) !important;
+  color: var(--text-secondary) !important;
+}
+
+.cm-tooltip {
+  background-color: var(--bg-elevated) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 6px !important;
+  color: var(--text-primary) !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+}

@@ -1,0 +1,19 @@
+# Build artifacts
+bin/
+dist/
+build/linux/AppDir/
+frontend/dist/
+frontend/node_modules/
+
+# Local runtime data & test scratch
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.local
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

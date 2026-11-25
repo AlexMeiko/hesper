@@ -1,0 +1,62 @@
+version: '3'
+
+tasks:
+  bindings:
+    desc: Generate TypeScript bindings from Go Wails v3 services
+    cmds:
+      - wails3 generate bindings -ts -i -d frontend/bindings ./...
+
+  frontend:install:
+    desc: Install frontend dependencies with pnpm
+    dir: frontend
+    cmds:
+      - pnpm install
+
+  frontend:build:
+    desc: Type-check and build Vue 3 frontend assets
+    dir: frontend
+    cmds:
+      - pnpm build
+
+  frontend:test:
+    desc: Run frontend Vitest unit tests
+    dir: frontend
+    cmds:
+      - pnpm test
+
+  build:linux:
+    desc: Build native Linux GTK4 + WebKitGTK 6.0 binary
+    deps: [bindings, frontend:build]
+    cmds:
+      - go build -trimpath -ldflags="-s -w" -o bin/sql-manager .
+
+  build:server:
+    desc: Build headless HTTP server binary (Wails v3 server mode)
+    deps: [bindings, frontend:build]
+    cmds:
+      - go build -tags server -trimpath -ldflags="-s -w" -o bin/sql-manager-server .
+
+  package:appimage:
+    desc: Package Linux x86_64 GTK4 Type 2 AppImage into dist/
+    deps: [build:linux]
+    cmds:
+      - bash scripts/package-appimage.sh
+
+  test:db:up:
+    desc: Start real MySQL 8.4 + PostgreSQL 16 Docker test containers
+    cmds:
+      - docker compose -f docker-compose.test.yml up -d --wait
+
+  test:db:down:
+    desc: Stop and remove Docker test containers and volumes
+    cmds:
+      - docker compose -f docker-compose.test.yml down -v
+
+  test:go:
+    desc: Run full Go unit & real DB integration tests with -race
+    cmds:
+      - go test -v -race -count=1 ./...
+
+  test:all:
+    desc: Run all Go backend + frontend tests
+    deps: [test:go, frontend:test]

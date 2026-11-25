@@ -1,0 +1,37 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: sqlm-mysql-84
+    environment:
+      MYSQL_ROOT_PASSWORD: sqlm_root_pw
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - ./test/mysql/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-storage-engine=InnoDB
+      - --log-bin-trust-function-creators=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-psqlm_root_pw"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: postgres:16
+    container_name: sqlm-postgres-16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: sqlm_pg_pw
+      POSTGRES_DB: sqlm_demo
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ./test/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sqlm_demo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

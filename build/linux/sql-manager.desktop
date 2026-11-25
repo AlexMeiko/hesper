@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SQL Manager
+GenericName=Database Client
+Comment=Lightweight cross-platform desktop database workbench for MySQL & PostgreSQL
+Exec=sql-manager %U
+Icon=sql-manager
+Terminal=false
+Categories=Development;Database;
+StartupWMClass=sql-manager
+Keywords=SQL;MySQL;PostgreSQL;Database;Client;Workbench;
