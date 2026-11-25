@@ -128,6 +128,9 @@ export const api = {
   disconnect(connID: string): Promise<void> {
     return call(() => ConnBinding.Disconnect(connID))
   },
+  pickSQLiteFile(): Promise<string> {
+    return call(() => ConnBinding.PickSQLiteFile())
+  },
 
   // --- Schema / Explorer (Track A) ---
   async listDatabases(connID: string): Promise<DatabaseInfo[]> {

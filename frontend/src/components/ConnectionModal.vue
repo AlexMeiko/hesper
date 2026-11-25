@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { reactive, ref, watch } from 'vue'
-import { CheckCircle2, Loader2, Shield, X, XCircle } from 'lucide-vue-next'
+import { computed, reactive, ref, watch } from 'vue'
+import { CheckCircle2, FolderOpen, Loader2, Shield, X, XCircle } from 'lucide-vue-next'
 import { api, EngineType, parseAppError, type TestConnectionResult } from '@/api/client'
 import { useConnectionsStore } from '@/stores/connections'
-import { envColorHex, envColorLabel } from '@/utils/format'
+import { engineLabel, envColorHex, envColorLabel, fileBaseName } from '@/utils/format'
 
 const connStore = useConnectionsStore()
 
@@ -19,14 +19,25 @@ const form = reactive({
   password: '',
   updatePassword: true,
   defaultDatabase: '',
+  filePath: '',
   tlsMode: 'disable',
   connectTimeoutS: 10,
 })
 
 const testing = ref(false)
 const saving = ref(false)
+const pickingFile = ref(false)
 const testResult = ref<TestConnectionResult | null>(null)
 const formError = ref('')
+
+const isSQLite = computed(() => form.driver === EngineType.EngineSQLite)
+
+const driverOptions: { value: EngineType; label: string }[] = [
+  { value: EngineType.EngineMySQL, label: 'MySQL' },
+  { value: EngineType.EnginePostgres, label: 'PostgreSQL' },
+  { value: EngineType.EngineMariaDB, label: 'MariaDB' },
+  { value: EngineType.EngineSQLite, label: 'SQLite' },
+]
 
 watch(
   () => [connStore.modalOpen, connStore.editingConnection] as const,
@@ -40,12 +51,13 @@ watch(
       form.driver = editing.driver
       form.envColor = editing.envColor || 'default'
       form.readOnly = editing.readOnly
-      form.host = editing.params.host
-      form.port = editing.params.port
-      form.username = editing.params.username
+      form.host = editing.params.host || '127.0.0.1'
+      form.port = editing.params.port || (editing.driver === EngineType.EnginePostgres ? 5432 : 3306)
+      form.username = editing.params.username || ''
       form.password = ''
       form.updatePassword = false // Preserve existing stored credential unless user enters a new one
       form.defaultDatabase = editing.params.defaultDatabase || ''
+      form.filePath = editing.params.filePath || ''
       form.tlsMode = editing.params.tls?.mode || 'disable'
       form.connectTimeoutS = editing.params.connectTimeoutS || 10
     } else {
@@ -60,6 +72,7 @@ watch(
       form.password = ''
       form.updatePassword = true
       form.defaultDatabase = ''
+      form.filePath = ''
       form.tlsMode = 'disable'
       form.connectTimeoutS = 10
     }
@@ -69,21 +82,64 @@ watch(
 
 function onDriverChange(drv: EngineType) {
   form.driver = drv
+  testResult.value = null
+  formError.value = ''
   if (!form.id) {
     if (drv === EngineType.EnginePostgres) {
       if (form.port === 3306) form.port = 5432
       if (form.username === 'root') form.username = 'postgres'
-    } else if (drv === EngineType.EngineMySQL) {
+    } else if (drv === EngineType.EngineMySQL || drv === EngineType.EngineMariaDB) {
       if (form.port === 5432) form.port = 3306
       if (form.username === 'postgres') form.username = 'root'
     }
   }
 }
 
+async function pickSQLiteFile() {
+  pickingFile.value = true
+  formError.value = ''
+  try {
+    const selected = await api.pickSQLiteFile()
+    if (selected && selected.trim()) {
+      form.filePath = selected.trim()
+      if (!form.name.trim()) {
+        form.name = fileBaseName(form.filePath)
+      }
+    }
+  } catch (err) {
+    const e = parseAppError(err)
+    formError.value = e.message
+  } finally {
+    pickingFile.value = false
+  }
+}
+
 function buildRequest() {
+  if (form.driver === EngineType.EngineSQLite) {
+    const fp = form.filePath.trim()
+    return {
+      id: form.id || undefined,
+      name: form.name.trim() || fileBaseName(fp) || 'SQLite',
+      driver: form.driver,
+      envColor: form.envColor,
+      readOnly: form.readOnly,
+      params: {
+        host: '',
+        port: 0,
+        username: '',
+        defaultDatabase: '',
+        filePath: fp,
+        tls: { mode: 'disable' },
+        connectTimeoutS: Number(form.connectTimeoutS) || 10,
+      },
+      password: '',
+      updatePassword: false,
+    }
+  }
+
   return {
     id: form.id || undefined,
-    name: form.name.trim() || `${form.driver.toUpperCase()} ${form.host}:${form.port}`,
+    name: form.name.trim() || `${engineLabel(form.driver)} ${form.host}:${form.port}`,
     driver: form.driver,
     envColor: form.envColor,
     readOnly: form.readOnly,
@@ -92,6 +148,7 @@ function buildRequest() {
       port: Number(form.port) || (form.driver === EngineType.EnginePostgres ? 5432 : 3306),
       username: form.username.trim(),
       defaultDatabase: form.defaultDatabase.trim(),
+      filePath: '',
       tls: { mode: form.tlsMode },
       connectTimeoutS: Number(form.connectTimeoutS) || 10,
     },
@@ -160,31 +217,21 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
 
       <!-- Body -->
       <form class="p-5 space-y-4 overflow-y-auto" @submit.prevent="onSubmit">
-        <!-- Driver Selector -->
-        <div class="grid grid-cols-2 gap-2.5">
+        <!-- 4-Engine Driver Selector -->
+        <div class="grid grid-cols-4 gap-2">
           <button
+            v-for="opt in driverOptions"
+            :key="opt.value"
             type="button"
-            class="h-10 px-4 rounded-lg border font-medium text-xs cursor-pointer outline-none transition-colors"
+            class="h-10 px-3 rounded-lg border font-medium text-xs cursor-pointer outline-none transition-colors"
             :style="{
-              borderColor: form.driver === EngineType.EngineMySQL ? 'var(--accent)' : 'var(--border-subtle)',
-              background: form.driver === EngineType.EngineMySQL ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-              color: form.driver === EngineType.EngineMySQL ? 'var(--accent-text)' : 'var(--text-primary)',
+              borderColor: form.driver === opt.value ? 'var(--accent)' : 'var(--border-subtle)',
+              background: form.driver === opt.value ? 'var(--accent-soft)' : 'var(--bg-canvas)',
+              color: form.driver === opt.value ? 'var(--accent-text)' : 'var(--text-primary)',
             }"
-            @click="onDriverChange(EngineType.EngineMySQL)"
+            @click="onDriverChange(opt.value)"
           >
-            MySQL
-          </button>
-          <button
-            type="button"
-            class="h-10 px-4 rounded-lg border font-medium text-xs cursor-pointer outline-none transition-colors"
-            :style="{
-              borderColor: form.driver === EngineType.EnginePostgres ? 'var(--accent)' : 'var(--border-subtle)',
-              background: form.driver === EngineType.EnginePostgres ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-              color: form.driver === EngineType.EnginePostgres ? 'var(--accent-text)' : 'var(--text-primary)',
-            }"
-            @click="onDriverChange(EngineType.EnginePostgres)"
-          >
-            PostgreSQL
+            {{ opt.label }}
           </button>
         </div>
 
@@ -195,7 +242,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
             v-model="form.name"
             type="text"
             class="input-field"
-            placeholder="例如：生产订单库 (只读)"
+            :placeholder="isSQLite ? '例如：本地业务库 (app.db)' : '例如：生产订单库 (只读)'"
           />
         </label>
 
@@ -221,60 +268,92 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
           </div>
         </div>
 
-        <!-- Host & Port -->
-        <div class="grid grid-cols-12 gap-3">
-          <label class="col-span-8 flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">主机地址 (Host)</span>
-            <input v-model="form.host" type="text" class="input-field font-mono-tabular" required />
-          </label>
-          <label class="col-span-4 flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">端口 (Port)</span>
-            <input v-model.number="form.port" type="number" class="input-field font-mono-tabular" required />
-          </label>
-        </div>
+        <!-- SQLite Local File Mode -->
+        <template v-if="isSQLite">
+          <div class="flex flex-col gap-1.5 text-xs">
+            <span style="color: var(--text-secondary)">SQLite 数据库文件路径</span>
+            <div class="flex items-center gap-2">
+              <input
+                v-model="form.filePath"
+                type="text"
+                class="input-field font-mono-tabular flex-1"
+                placeholder="例如 /path/to/database.db（支持 .db / .sqlite / .sqlite3）"
+                required
+              />
+              <button
+                type="button"
+                class="btn !h-[34px] shrink-0"
+                :disabled="pickingFile"
+                @click="pickSQLiteFile"
+              >
+                <Loader2 v-if="pickingFile" class="w-3.5 h-3.5 animate-spin" />
+                <FolderOpen v-else class="w-3.5 h-3.5" />
+                选择文件...
+              </button>
+            </div>
+            <div class="text-[11px]" style="color: var(--text-muted)">
+              直接读取已存在的本地 SQLite 文件；若路径不存在将直接报错，不会静默创建空库文件。
+            </div>
+          </div>
+        </template>
 
-        <!-- Username & Password -->
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">用户名</span>
-            <input v-model="form.username" type="text" class="input-field font-mono-tabular" required />
-          </label>
-          <label class="flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">
-              密码
-              <span v-if="form.id" class="text-[11px]" style="color: var(--text-faint)">(留空则保持原密码)</span>
-            </span>
-            <input
-              v-model="form.password"
-              type="password"
-              class="input-field font-mono-tabular"
-              :placeholder="form.id ? '••••••••（未修改）' : '输入密码'"
-            />
-          </label>
-        </div>
+        <!-- Network Engine Mode (MySQL / PostgreSQL / MariaDB) -->
+        <template v-else>
+          <!-- Host & Port -->
+          <div class="grid grid-cols-12 gap-3">
+            <label class="col-span-8 flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">主机地址 (Host)</span>
+              <input v-model="form.host" type="text" class="input-field font-mono-tabular" required />
+            </label>
+            <label class="col-span-4 flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">端口 (Port)</span>
+              <input v-model.number="form.port" type="number" class="input-field font-mono-tabular" required />
+            </label>
+          </div>
 
-        <!-- Default DB & TLS -->
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">默认数据库（可选）</span>
-            <input
-              v-model="form.defaultDatabase"
-              type="text"
-              class="input-field font-mono-tabular"
-              :placeholder="form.driver === EngineType.EnginePostgres ? 'postgres' : '例如 app_db'"
-            />
-          </label>
-          <label class="flex flex-col gap-1 text-xs">
-            <span style="color: var(--text-secondary)">TLS 加密模式</span>
-            <select v-model="form.tlsMode" class="input-field">
-              <option value="disable">关闭 (disable)</option>
-              <option value="prefer">优先 (prefer)</option>
-              <option value="require">强制加密 (require)</option>
-            </select>
-          </label>
-        </div>
+          <!-- Username & Password -->
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">用户名</span>
+              <input v-model="form.username" type="text" class="input-field font-mono-tabular" required />
+            </label>
+            <label class="flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">
+                密码
+                <span v-if="form.id" class="text-[11px]" style="color: var(--text-faint)">(留空则保持原密码)</span>
+              </span>
+              <input
+                v-model="form.password"
+                type="password"
+                class="input-field font-mono-tabular"
+                :placeholder="form.id ? '••••••••（未修改）' : '输入密码'"
+              />
+            </label>
+          </div>
 
-        <!-- Honest Client Read-Only Protection Toggle -->
+          <!-- Default DB & TLS -->
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">默认数据库（可选）</span>
+              <input
+                v-model="form.defaultDatabase"
+                type="text"
+                class="input-field font-mono-tabular"
+                :placeholder="form.driver === EngineType.EnginePostgres ? 'postgres' : '例如 app_db'"
+              />
+            </label>
+            <label class="flex flex-col gap-1 text-xs">
+              <span style="color: var(--text-secondary)">TLS 加密模式</span>
+              <select v-model="form.tlsMode" class="input-field">
+                <option value="disable">关闭 (disable)</option>
+                <option value="prefer">优先 (prefer)</option>
+                <option value="require">强制加密 (require)</option>
+              </select>
+            </label>
+          </div>
+        </template>
+
+        <!-- Read-Only Protection Toggle -->
         <label
           class="flex items-start gap-2.5 rounded-lg border p-3 cursor-pointer"
           style="background: var(--bg-surface); border-color: var(--border-subtle)"
@@ -283,10 +362,20 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
           <div class="space-y-0.5 text-xs">
             <div class="font-medium flex items-center gap-1.5" style="color: var(--text-primary)">
               <Shield class="w-3.5 h-3.5" style="color: var(--warning)" />
-              启用客户端只读保护（防误写提示与只读会话）
+              <template v-if="isSQLite">
+                以只读模式打开文件（引擎级 mode=ro + query_only=ON）
+              </template>
+              <template v-else>
+                启用客户端只读保护（防误写提示与只读会话）
+              </template>
             </div>
             <div class="text-[11px] leading-relaxed" style="color: var(--text-muted)">
-              客户端会自动拦截显式写语句并设置会话只读；生产环境的强只读约束请始终以数据库账号实际权限为准。
+              <template v-if="isSQLite">
+                SQLite 引擎将以只读权限打开文件并启用 query_only，从底层拦截所有写入与 DDL 操作。
+              </template>
+              <template v-else>
+                客户端会自动拦截显式写语句并设置会话只读；生产环境的强只读约束请始终以数据库账号实际权限为准。
+              </template>
             </div>
           </div>
         </label>
@@ -305,7 +394,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
           <XCircle v-else class="w-4 h-4 shrink-0 mt-0.5" />
           <div class="min-w-0">
             <div v-if="testResult.success" class="font-medium">
-              连接成功 · {{ testResult.detectedType.toUpperCase() }} {{ testResult.serverVersion }} ({{ testResult.latencyMs }} ms)
+              连接成功 · {{ engineLabel(testResult.detectedType) }} {{ testResult.serverVersion }} ({{ testResult.latencyMs }} ms)
             </div>
             <template v-else>
               <div class="font-medium">{{ testResult.error?.message || '连接测试失败' }}</div>

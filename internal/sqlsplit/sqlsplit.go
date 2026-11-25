@@ -359,10 +359,13 @@ func Classify(stmt string, dialect Dialect) (StatementKind, string, bool) {
 	}
 }
 
-// IsReadOnlyEscapeSet detects SET statements trying to disable session read-only mode.
+// IsReadOnlyEscapeSet detects SET or SQLite PRAGMA statements trying to disable session read-only mode.
 func IsReadOnlyEscapeSet(stmt string, dialect Dialect) bool {
-	upper := strings.ToUpper(stripCommentsAndStrings(stmt, dialect))
-	if !strings.HasPrefix(strings.TrimSpace(upper), "SET") {
+	upper := strings.TrimSpace(strings.ToUpper(stripCommentsAndStrings(stmt, dialect)))
+	if dialect == DialectSQLite && strings.HasPrefix(upper, "PRAGMA") {
+		return strings.Contains(upper, "QUERY_ONLY") || strings.Contains(upper, "WRITABLE_SCHEMA")
+	}
+	if !strings.HasPrefix(upper, "SET") {
 		return false
 	}
 	return strings.Contains(upper, "TRANSACTION_READ_ONLY") ||

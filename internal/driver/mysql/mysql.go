@@ -506,6 +506,38 @@ func (c *Conn) ListViews(ctx context.Context, db, _ string) ([]dto.ObjectSummary
 	return out, rows.Err()
 }
 
+// ListSequences implements driver.SequenceInspector for MariaDB (where sequences are TABLE_TYPE = 'SEQUENCE').
+// MySQL does not support native sequences and returns nil cleanly.
+func (c *Conn) ListSequences(ctx context.Context, db, _ string) ([]dto.ObjectSummary, error) {
+	if c.detectedType != dto.EngineMariaDB {
+		return nil, nil
+	}
+	rows, err := c.conn.QueryContext(ctx, `
+		SELECT TABLE_NAME, COALESCE(TABLE_COMMENT, '')
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'SEQUENCE'
+		ORDER BY TABLE_NAME`, db)
+	if err != nil {
+		return nil, classifyMySQLError(err, false)
+	}
+	defer rows.Close()
+
+	var out []dto.ObjectSummary
+	for rows.Next() {
+		var name, comment string
+		if err := rows.Scan(&name, &comment); err != nil {
+			return nil, err
+		}
+		out = append(out, dto.ObjectSummary{
+			Database: db,
+			Name:     name,
+			Kind:     "sequence",
+			Comment:  comment,
+		})
+	}
+	return out, rows.Err()
+}
+
 func (c *Conn) GetTableDetail(ctx context.Context, db, _, table string) (*dto.TableDetail, error) {
 	detail := &dto.TableDetail{
 		Database: db,
@@ -1020,7 +1052,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 	var me *mysqldriver.MySQLError
 	if errors.As(err, &me) {
 		switch me.Number {
-		case 1317, 1028, 3024:
+		case 1317, 1028, 1969, 3024:
 			return &dto.AppError{
 				Code:     dto.ErrStatementCanceled,
 				Message:  "当前语句已取消，原会话保持存活",
@@ -1051,7 +1083,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 		default:
 			return &dto.AppError{
 				Code:     dto.ErrInternal,
-				Message:  fmt.Sprintf("MySQL 错误 (%d): %s", me.Number, me.Message),
+				Message:  fmt.Sprintf("数据库错误 (%d): %s", me.Number, me.Message),
 				Detail:   me.Message,
 				SQLState: string(me.SQLState[:]),
 			}

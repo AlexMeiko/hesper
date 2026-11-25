@@ -108,7 +108,16 @@ func (s *ConnectionService) SaveConnection(ctx context.Context, req dto.SaveConn
 	if req.EnvColor == "" {
 		req.EnvColor = "default"
 	}
-	if req.Params.Port <= 0 {
+	if req.Driver == dto.EngineSQLite {
+		req.Params.FilePath = strings.TrimSpace(req.Params.FilePath)
+		if req.Params.FilePath == "" {
+			return dto.ConnectionDTO{}, dto.NewAppError(dto.ErrInvalidArgument, "SQLite 数据库文件路径不能为空", "")
+		}
+		req.Params.Host = ""
+		req.Params.Port = 0
+		req.Params.Username = ""
+		req.Params.DefaultDatabase = "main"
+	} else if req.Params.Port <= 0 {
 		switch req.Driver {
 		case dto.EnginePostgres:
 			req.Params.Port = 5432

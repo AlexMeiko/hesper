@@ -4,6 +4,7 @@ import { FilePlus2, Moon, Plug, Plus, Search, Sun, Table2 } from 'lucide-vue-nex
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { connectionEndpointSummary, engineLabel } from '@/utils/format'
 
 const connStore = useConnectionsStore()
 const wsStore = useWorkspaceStore()
@@ -27,7 +28,7 @@ const entries = computed<PaletteEntry[]>(() => {
       id: 'act-new-conn',
       kind: 'action',
       label: '新建数据库连接',
-      sub: '配置 MySQL 或 PostgreSQL 连接',
+      sub: '配置 MySQL、PostgreSQL、MariaDB 或 SQLite 连接',
       run: () => connStore.openNewConnectionModal(),
     },
     {
@@ -44,7 +45,7 @@ const entries = computed<PaletteEntry[]>(() => {
       id: `conn-query-${c.id}`,
       kind: 'connection',
       label: `新建查询 · ${c.name}`,
-      sub: `${c.driver.toUpperCase()} · ${c.params.host}:${c.params.port}`,
+      sub: `${engineLabel(c.driver)} · ${connectionEndpointSummary(c)}`,
       run: () => void wsStore.openQueryTab(c.id),
     })
   }
@@ -52,12 +53,14 @@ const entries = computed<PaletteEntry[]>(() => {
   for (const [key, objs] of Object.entries(connStore.objectsMap)) {
     const [connId, db, schema] = key.split('::')
     const conn = connStore.getConnection(connId)
+    const active = connStore.getActive(connId)
+    const location = active?.capabilities.hasDatabases === false ? conn?.name ?? connId : `${conn?.name ?? connId} / ${db}`
     for (const t of objs.tables) {
       list.push({
         id: `tbl-${key}-${t.name}`,
         kind: 'table',
         label: schema ? `${schema}.${t.name}` : t.name,
-        sub: `实时浏览表 · ${conn?.name ?? connId} / ${db}`,
+        sub: `实时浏览表 · ${location}`,
         run: () => void wsStore.openTableBrowse(connId, db, schema, t.name),
       })
     }

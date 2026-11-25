@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { ErrorCode, SessionState, ValueKind, type CellValue, type ColumnMeta } from '@/api/client'
+import { EngineType, ErrorCode, SessionState, ValueKind, type CellValue, type ColumnMeta } from '@/api/client'
+import ConnectionModal from '@/components/ConnectionModal.vue'
 import DataGrid from '@/components/DataGrid.vue'
 import SessionBanner from '@/components/SessionBanner.vue'
 import ValueInspector from '@/components/ValueInspector.vue'
+import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
-import { cellToPlainText, estimateColumnWidth, rowsToJSON, tokenizeWhitespace } from '@/utils/format'
+import {
+  cellToPlainText,
+  connectionEndpointSummary,
+  engineLabel,
+  estimateColumnWidth,
+  rowsToJSON,
+  tokenizeWhitespace,
+} from '@/utils/format'
 
 describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 3)', () => {
   beforeEach(() => {
@@ -198,5 +207,65 @@ describe('SessionBanner safety semantics (Criteria 1, 2, 3)', () => {
     expect(banner.exists()).toBe(true)
     await banner.find('button').trigger('click')
     expect(wrapper.emitted('rollback')).toHaveLength(1)
+  })
+})
+
+describe('4-engine workbench support (MySQL, PostgreSQL, MariaDB, SQLite)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('formats engine labels and SQLite vs network connection endpoints cleanly', () => {
+    expect(engineLabel(EngineType.EngineMySQL)).toBe('MySQL')
+    expect(engineLabel(EngineType.EnginePostgres)).toBe('PostgreSQL')
+    expect(engineLabel(EngineType.EngineMariaDB)).toBe('MariaDB')
+    expect(engineLabel(EngineType.EngineSQLite)).toBe('SQLite')
+
+    expect(
+      connectionEndpointSummary({
+        driver: EngineType.EngineSQLite,
+        params: { filePath: '/data/projects/billing.sqlite3' },
+      }),
+    ).toBe('billing.sqlite3')
+
+    expect(
+      connectionEndpointSummary({
+        driver: EngineType.EngineMariaDB,
+        params: { host: '127.0.0.1', port: 13307 },
+      }),
+    ).toBe('127.0.0.1:13307')
+  })
+
+  it('switches ConnectionModal cleanly between network engines (MariaDB/MySQL/PG) and SQLite file mode', async () => {
+    const connStore = useConnectionsStore()
+    connStore.openNewConnectionModal()
+
+    const wrapper = mount(ConnectionModal)
+    const buttons = wrapper.findAll('button')
+    const btnTexts = buttons.map((b) => b.text().trim())
+    expect(btnTexts).toContain('MySQL')
+    expect(btnTexts).toContain('PostgreSQL')
+    expect(btnTexts).toContain('MariaDB')
+    expect(btnTexts).toContain('SQLite')
+
+    // Switch to SQLite: hides host/port/password and shows local file picker + engine mode=ro copy
+    const sqliteBtn = buttons.find((b) => b.text().trim() === 'SQLite')
+    expect(sqliteBtn).toBeDefined()
+    await sqliteBtn!.trigger('click')
+
+    expect(wrapper.text()).toContain('SQLite 数据库文件路径')
+    expect(wrapper.text()).toContain('选择文件...')
+    expect(wrapper.text()).toContain('mode=ro')
+    expect(wrapper.text()).not.toContain('主机地址 (Host)')
+    expect(wrapper.text()).not.toContain('TLS 加密模式')
+
+    // Switch to MariaDB: restores host/port/TLS and defaults back to port 3306 / root
+    const mariaBtn = buttons.find((b) => b.text().trim() === 'MariaDB')
+    expect(mariaBtn).toBeDefined()
+    await mariaBtn!.trigger('click')
+
+    expect(wrapper.text()).toContain('主机地址 (Host)')
+    expect(wrapper.text()).toContain('TLS 加密模式')
+    expect(wrapper.text()).toContain('客户端只读保护')
   })
 })

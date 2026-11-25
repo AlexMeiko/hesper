@@ -6,7 +6,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { autocompletion, completionKeymap } from '@codemirror/autocomplete'
 import { bracketMatching, defaultHighlightStyle, HighlightStyle, syntaxHighlighting } from '@codemirror/language'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
-import { MySQL, PostgreSQL, sql, type SQLNamespace } from '@codemirror/lang-sql'
+import { MariaSQL, MySQL, PostgreSQL, SQLite, sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { tags } from '@lezer/highlight'
 import { EngineType, type CompletionCatalog } from '@/api/client'
 import type { ThemeMode } from '@/stores/settings'
@@ -40,8 +40,21 @@ const darkHighlight = HighlightStyle.define([
   { tag: tags.propertyName, color: '#e2e8f0' },
 ])
 
+function resolveDialect(dialect: EngineType) {
+  switch (dialect) {
+    case EngineType.EnginePostgres:
+      return PostgreSQL
+    case EngineType.EngineMariaDB:
+      return MariaSQL
+    case EngineType.EngineSQLite:
+      return SQLite
+    default:
+      return MySQL
+  }
+}
+
 function buildSqlExtension() {
-  const langDialect = props.dialect === EngineType.EnginePostgres ? PostgreSQL : MySQL
+  const langDialect = resolveDialect(props.dialect)
   const schema: SQLNamespace = {}
   if (props.catalog?.tables) {
     for (const [tbl, cols] of Object.entries(props.catalog.tables)) {

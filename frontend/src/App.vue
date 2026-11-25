@@ -152,7 +152,7 @@ onBeforeUnmount(() => {
                     欢迎使用 SQL Manager
                   </h1>
                   <p class="text-xs m-0 leading-relaxed" style="color: var(--text-muted)">
-                    面向 MySQL 与 PostgreSQL 的轻量桌面查询工作台。每个查询标签独占一条物理连接，表浏览与编辑器一次性快照清晰分离。
+                    面向 MySQL、PostgreSQL、MariaDB 与 SQLite 的轻量桌面查询工作台。每个查询标签独占一条物理连接，表浏览与编辑器一次性快照清晰分离。
                   </p>
                 </div>
 

@@ -30,6 +30,10 @@ export function ListConnections(): $CancellablePromise<dto$0.ConnectionDTO[] | n
     return $Call.ByID(760268029);
 }
 
+export function PickSQLiteFile(): $CancellablePromise<string> {
+    return $Call.ByID(4215676539);
+}
+
 export function SaveConnection(req: dto$0.SaveConnectionRequest): $CancellablePromise<dto$0.ConnectionDTO> {
     return $Call.ByID(2118137821, req);
 }

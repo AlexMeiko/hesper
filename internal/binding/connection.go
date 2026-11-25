@@ -9,11 +9,25 @@ import (
 
 // ConnectionBinding is the Wails v3 boundary adapter for connection management.
 type ConnectionBinding struct {
-	svc *service.ConnectionService
+	svc            *service.ConnectionService
+	pickSQLiteFile func() (string, error)
 }
 
 func NewConnectionBinding(svc *service.ConnectionService) *ConnectionBinding {
 	return &ConnectionBinding{svc: svc}
+}
+
+// AttachSQLiteFilePicker injects the Wails native OpenFile dialog callback from bootstrap
+// without exposing a callback setter method over Wails RPC.
+func AttachSQLiteFilePicker(b *ConnectionBinding, fn func() (string, error)) {
+	b.pickSQLiteFile = fn
+}
+
+func (b *ConnectionBinding) PickSQLiteFile() (string, error) {
+	if b.pickSQLiteFile == nil {
+		return "", dto.NewAppError(dto.ErrUnsupported, "当前运行模式不支持本地文件选择器，请手动输入文件路径", "")
+	}
+	return b.pickSQLiteFile()
 }
 
 func (b *ConnectionBinding) ListConnections(ctx context.Context) ([]dto.ConnectionDTO, error) {

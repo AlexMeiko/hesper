@@ -17,6 +17,7 @@ import (
 	"sql-manager/internal/driver"
 	"sql-manager/internal/driver/mysql"
 	"sql-manager/internal/driver/postgres"
+	"sql-manager/internal/driver/sqlite"
 	"sql-manager/internal/dto"
 	"sql-manager/internal/repository"
 	"sql-manager/internal/resultbuf"
@@ -37,10 +38,12 @@ func Run(paths config.Paths, assets fs.FS) error {
 	// 2. Credential store (OS Keyring with encrypted file fallback).
 	secretStore := secret.NewStore(paths.ConfigDir)
 
-	// 3. Static driver registry — Phase 1A/1B registers real MySQL 8.4 and PostgreSQL drivers.
+	// 3. Static driver registry — all 4 Gate 1 engines explicitly registered.
 	reg := driver.NewRegistry()
 	reg.Register(mysql.NewOpener(dto.EngineMySQL))
+	reg.Register(mysql.NewOpener(dto.EngineMariaDB))
 	reg.Register(postgres.NewOpener())
+	reg.Register(sqlite.NewOpener())
 
 	// 4. Execute-Once result snapshot buffer (memory -> disk spill with hard cap + TTL).
 	resMgr := resultbuf.NewManager(resultbuf.Options{
@@ -72,7 +75,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 	// 7. Create Wails v3 application.
 	app := application.New(application.Options{
 		Name:        "SQL Manager",
-		Description: "Lightweight cross-platform desktop database workbench for MySQL & PostgreSQL",
+		Description: "Lightweight cross-platform desktop database workbench for MySQL, PostgreSQL, MariaDB & SQLite",
 		LogLevel:    slog.LevelWarn,
 		Services: []application.Service{
 			application.NewService(connBinding),
@@ -100,7 +103,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 		},
 	})
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	mainWin := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
 		Title:            "SQL Manager",
 		Width:            1360,
@@ -109,6 +112,15 @@ func Run(paths config.Paths, assets fs.FS) error {
 		MinHeight:        640,
 		BackgroundColour: application.NewRGB(248, 250, 252),
 		URL:              "/",
+	})
+
+	binding.AttachSQLiteFilePicker(connBinding, func() (string, error) {
+		return app.Dialog.OpenFile().
+			AttachToWindow(mainWin).
+			SetTitle("选择 SQLite 数据库文件").
+			AddFilter("SQLite 数据库 (*.db, *.sqlite, *.sqlite3)", "*.db;*.sqlite;*.sqlite3;*.db3").
+			AddFilter("所有文件 (*.*)", "*").
+			PromptForSingleSelection()
 	})
 
 	return app.Run()

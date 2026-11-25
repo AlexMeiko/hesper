@@ -35,3 +35,21 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  mariadb:
+    image: mariadb:11.4
+    container_name: sqlm-mariadb-114
+    environment:
+      MARIADB_ROOT_PASSWORD: sqlm_root_pw
+    ports:
+      - "127.0.0.1:13307:3306"
+    volumes:
+      - ./test/mariadb/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

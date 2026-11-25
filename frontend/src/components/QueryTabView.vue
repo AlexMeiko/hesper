@@ -269,7 +269,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
       <!-- Target Database & Schema Switchers -->
       <div class="flex items-center gap-1.5">
-        <div class="flex items-center gap-1 text-xs" style="color: var(--text-muted)">
+        <div
+          v-if="capabilities?.hasDatabases !== false"
+          class="flex items-center gap-1 text-xs"
+          style="color: var(--text-muted)"
+        >
           <Database class="w-3.5 h-3.5" />
           <select
             :value="tab.database"
@@ -287,6 +291,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               {{ db.name }}
             </option>
           </select>
+        </div>
+
+        <div
+          v-else-if="conn"
+          class="flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-md border"
+          style="background: var(--bg-canvas); border-color: var(--border-subtle); color: var(--text-secondary)"
+          :title="conn.params.filePath || conn.name"
+        >
+          <Database class="w-3.5 h-3.5 shrink-0" style="color: var(--accent)" />
+          <span class="font-mono-tabular truncate max-w-[220px]">{{ conn.name }}</span>
         </div>
 
         <div v-if="capabilities?.hasSchemas" class="flex items-center gap-1 text-xs" style="color: var(--text-muted)">
@@ -311,10 +325,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           v-if="tab.readOnly"
           class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
           style="background: var(--warning-soft); color: var(--warning)"
-          title="此连接启用了客户端只读保护（生产强只读仍以数据库账号权限为准）"
+          :title="
+            capabilities?.hasDatabases === false
+              ? 'SQLite 引擎级只读打开 (mode=ro + query_only=ON)'
+              : '此连接启用了客户端只读保护（生产强只读仍以数据库账号权限为准）'
+          "
         >
           <Shield class="w-3 h-3" />
-          只读保护
+          {{ capabilities?.hasDatabases === false ? '只读文件' : '只读保护' }}
         </span>
 
         <span

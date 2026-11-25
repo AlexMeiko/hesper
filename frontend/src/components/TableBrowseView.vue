@@ -27,9 +27,19 @@ const connStore = useConnectionsStore()
 const wsStore = useWorkspaceStore()
 
 const conn = computed(() => connStore.getConnection(props.tab.connectionId))
+const activeConn = computed(() => connStore.getActive(props.tab.connectionId))
 const columns = computed(() => props.tab.response?.columns ?? [])
 const rows = computed(() => props.tab.response?.rows ?? [])
 const rowOffset = computed(() => (props.tab.page - 1) * props.tab.pageSize)
+const displayTablePath = computed(() => {
+  const parts: string[] = []
+  if (activeConn.value?.capabilities.hasDatabases !== false && props.tab.database) {
+    parts.push(props.tab.database)
+  }
+  if (props.tab.schema) parts.push(props.tab.schema)
+  parts.push(props.tab.table)
+  return parts.join('.')
+})
 
 const editabilitySummary = computed(() => {
   const ed = props.tab.response?.editability
@@ -130,7 +140,7 @@ function openNewQueryFromTable() {
           实时浏览
         </span>
         <span class="text-xs font-medium" style="color: var(--text-primary)">
-          {{ tab.database }}<template v-if="tab.schema">.{{ tab.schema }}</template>.{{ tab.table }}
+          {{ displayTablePath }}
         </span>
       </div>
 

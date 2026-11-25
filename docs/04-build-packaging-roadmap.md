@@ -65,8 +65,9 @@
 | **1** | **MySQL 8.0 / 5.7** | 主力 / 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 5.7 无原子 DDL，另需覆盖 MyISAM 非事务表完整写入验收 |
 | **2** | **PostgreSQL 16.16** | 第二个验证驱动 | **已验证** | **已验证** | 待验证 | 待验证 | `postgres:16` (`16.16-1.pgdg13+1`) 实测通过；验证切库重建连接、`SchemaSwitcher`、`CancelRequest`、`AliveFailedTx`、`INSERT ... RETURNING` Execute-Once |
 | **2** | **PostgreSQL 17 / 14 / 12** | 主力 / 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 需在 CI 矩阵中补测 |
-| **3** | **MariaDB 11.4 / 10.5** | 主力 / 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | Phase 1C 复用 MySQL 连接层 + 独立方言与 `SEQUENCE` 验收 |
-| **4** | **SQLite（内嵌 `3.54.1`）** | 内嵌单版本 | 待验证 | 待验证 | 待验证 | 待验证 | `modernc.org/sqlite v1.63.0` 内嵌 SQLite `3.54.1` 已登记并用于 `app.db`；用户库驱动与 3.2 回归待 Phase 1C 验收 |
+| **3** | **MariaDB 11.4.13** | 主力验证版本 | **已验证** | **已验证** | 待验证 | 待验证 | `mariadb:11.4` (`11.4.13-MariaDB-ubu2404`) 实测通过；验证原生 `SEQUENCE` 浏览、`KILL QUERY` 与迟到取消竞态、`INSERT ... RETURNING *` Execute-Once、MyISAM/无主键判定、只读拒写与断线报结果未知 |
+| **3** | **MariaDB 10.5** | 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 需在 CI 矩阵中补测 |
+| **4** | **SQLite（内嵌 `3.54.1`）** | 内嵌单版本 | **已验证** | **已验证** | 待验证 | 待验证 | 纯 Go `modernc.org/sqlite v1.63.0` 真实文件库实测通过：不静默建空库、`mode=ro` + `query_only=ON` 引擎级拒写、`sqlite3_interrupt` 中断保活、**3.2 `VACUUM` 隐式 `rowid` 重排 (`2→1`) 回归与显式主键判定** |
 
 > 注：非事务引擎（MyISAM）用例仅适用于 MySQL / MariaDB，对 PostgreSQL 与 SQLite 标为 `不适用`；`SEQUENCE` 浏览仅适用于 PostgreSQL 与 MariaDB，对 MySQL 与 SQLite 标为 `不适用`；**绝不把 `driver/fake` 模拟驱动通过算作真实数据库通过**。
 
@@ -77,7 +78,7 @@
 ### Phase 0：工程骨架与基础通路（已完成 Linux 端验证；Windows 实机打包待验证）
 - [x] 初始化 Go 1.27.4 / Wails v3.1.0 / Vue 3 + TS + Tailwind CSS 4 + CodeMirror 6 + TanStack Virtual 紧凑桌面工作台骨架，已登记 `modernc.org/sqlite v1.63.0` 内嵌 SQLite 版本为 **`3.54.1`**。
 - [x] 落地 `bootstrap → binding → service → repository / driver` 分层、`internal/platform` Linux 图形自检、`sql/001_init.sql` 本地 `app.db`、`internal/secret` 密钥环与降级加密库，以及支持故障注入的 `internal/driver/fake/`（仅用于纯单测，不替代真库验收）。
-- [x] **已验证（Linux）**：Linux（GTK4 `4.14.5` + WebKitGTK 6.0 `2.52.6`）原生桌面二进制与 Wails v3 Server 模式二进制均编译通过；`internal/session` 通过基于 `driver/fake` 的未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 单元测试。（Windows 实机编译与打包待验证）
+- [x] **已验证（Linux）**：Linux（GTK4 `4.14.5` + WebKitGTK 6.0 `2.52.6`）原生桌面二进制与精简 GTK4 AppImage 已在真实 Linux 桌面通过验证；`internal/session` 通过基于 `driver/fake` 的未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 单元测试。（Windows 实机编译与打包待验证）
 
 ### Phase 1A：MySQL 8.4 查询工作台纵向验收（已完成真库验收）
 - [x] 实现 **MySQL 驱动（`go-sql-driver/mysql`）** 与 `internal/session`（双轨连接 + 旁路 `KILL QUERY` 取消栅栏）、`internal/resultbuf`（内存/临时文件快照）、`internal/sqlsplit`。
@@ -91,13 +92,15 @@
 ### Phase 1B：PostgreSQL 抽象中立性检验（已完成真库验收）
 - [x] 实现 **PostgreSQL 驱动（`pgx/v5`）**，用真实 PostgreSQL `16.16` 验证公共接口没有写死 MySQL 假设（切库自动重建连接、`Database → Schema → Table` 三层浏览、`SEQUENCE` 浏览、`CancelRequest`、`AliveFailedTx`、原生 `INSERT ... RETURNING *` Execute-Once）；**仅在暴露真实差异处新增 1 个单方法可选接口 `driver.SchemaSwitcher`**，MySQL 驱动与公共核心零侵入。
 
-### Phase 1C：MariaDB 与 SQLite 分别验收 — 门禁 Gate 1（待开展）
-- [ ] 依次完成 **MariaDB**（复用 MySQL 连接层、独立方言与序列浏览）与 **SQLite**（文件只读打开、内嵌版本登记）的真库验收，四库全部通过查询/取消/只读/翻页目标后达成 **Gate 1**，方可开放网格写入。
+### Phase 1C：MariaDB 与 SQLite 分别验收 — 门禁 Gate 1（已完成真库验收，Gate 1 达成）
+- [x] 完成 **MariaDB `11.4.13`**（复用 MySQL 传输层 + 原生 `SEQUENCE` 枚举 + 超时错误码 `1969` + `MariaSQL` 编辑器方言）真库全量验收，通过取消/迟到取消竞态、`INSERT ... RETURNING *` Execute-Once、MyISAM/无主键判定、只读账号拒写与断线报结果未知。
+- [x] 完成 **SQLite `3.54.1`** 纯 Go 目标库驱动（原生文件选择器、不静默建空库、引擎级 `mode=ro` + `PRAGMA query_only = ON`、单文件对象树与 `SQLite` 编辑器方言）真库全量验收，并提前通过 **3.2 `VACUUM` 隐式 `rowid` 重排 (`2→1`) 回归用例**（严格拒绝隐式 `rowid` 与部分唯一索引作为稳定行键）。
+- [x] **Gate 1 门禁达成**：MySQL `8.4.13`、PostgreSQL `16.16`、MariaDB `11.4.13`、SQLite `3.54.1` 全部通过查询/取消/只读/翻页实测验收，可正式进入 Phase 2。
 
 ### Phase 2：安全网格写入、SSH 隧道与智能补全 — 门禁 Gate 2（2–3 周）
 - [ ] 实现 SSH 隧道池与完整 SSL 模式；实现后端 `InspectTableEditability` 三维度判定、`internal/changeset` 参数化 `ChangePlan` 与乐观并发冲突检测（MySQL 开启 `clientFoundRows=true`）。
 - [ ] 上线网格行内编辑（无稳定键仅允许新增、SQLite 禁隐式 `rowid`、MyISAM 禁整批提交、冲突保留草稿）、Value Inspector、基于 Schema 的 SQL 自动补全、查询历史与生产高危 SQL 二次确认。
-- [ ] **Gate 2 门禁**：通过 3.1“网格写入”全部场景与 3.2 的 `VACUUM` `rowid` 回归用例。
+- [ ] **Gate 2 门禁**：通过 3.1“网格写入”全部场景与 3.2 的 `VACUUM` `rowid` 回归用例（行定位判定部分已于 Phase 1C 回归通过，Phase 2 补齐端到端写入校验）。
 
 ### Phase 3：透明表设计器与流式导入导出 — 门禁 Gate 3（2–3 周）
 - [ ] 各驱动实现 `MigrationPlanner` 与 `MigrationExecutor`，输出准确原子性边界与五态 `MigrationReport`；实现 SQLite 含依赖视图与 `INSTEAD OF` 触发器的完整重建引擎。

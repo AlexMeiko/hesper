@@ -117,7 +117,12 @@ export const useConnectionsStore = defineStore('connections', () => {
     try {
       const res = await api.connect(connId)
       activeMap.value[connId] = res
-      await loadDatabases(connId)
+      if (res.capabilities.hasDatabases) {
+        await loadDatabases(connId)
+      } else {
+        databasesMap.value[connId] = []
+        await loadObjects(connId, res.currentDb || 'main', '')
+      }
       return res
     } catch (err) {
       const e = parseAppError(err)
@@ -205,11 +210,12 @@ export const useConnectionsStore = defineStore('connections', () => {
   }
 
   async function loadCompletionCatalog(connId: string, db: string, schema: string): Promise<CompletionCatalog | null> {
-    if (!connId || !db) return null
-    const key = objKey(connId, db, schema)
+    const effectiveDb = db || (activeMap.value[connId]?.capabilities.hasDatabases === false ? 'main' : '')
+    if (!connId || !effectiveDb) return null
+    const key = objKey(connId, effectiveDb, schema)
     if (catalogMap.value[key]) return catalogMap.value[key]
     try {
-      const cat = await api.fetchCompletionCatalog(connId, db, schema)
+      const cat = await api.fetchCompletionCatalog(connId, effectiveDb, schema)
       if (cat) {
         catalogMap.value[key] = cat
       }

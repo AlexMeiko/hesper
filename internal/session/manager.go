@@ -882,17 +882,22 @@ func (ts *TabSession) CancelExecution(ctx context.Context, execID string) dto.Ca
 	cancelCtx, cancelTimeout := context.WithTimeout(ctx, 4*time.Second)
 	defer cancelTimeout()
 
-	ctrlConn, releaseCtrl, err := ts.mgr.AcquireBypassControlConn(cancelCtx, ts.connID, db)
-	if err != nil {
-		ts.stateMu.Lock()
-		ts.cancelFailed = true
-		ts.stateMu.Unlock()
-		return dto.CancelExecutionResponse{
-			TabID:        ts.tabID,
-			ExecID:       execID,
-			Status:       "session_lost",
-			SessionState: dto.SessionLost,
-			Message:      "无法建立旁路取消连接，原会话已停止复用",
+	var ctrlConn driver.Conn
+	releaseCtrl := func(bool) {}
+	if targetConn.Dialect() != dto.EngineSQLite {
+		var err error
+		ctrlConn, releaseCtrl, err = ts.mgr.AcquireBypassControlConn(cancelCtx, ts.connID, db)
+		if err != nil {
+			ts.stateMu.Lock()
+			ts.cancelFailed = true
+			ts.stateMu.Unlock()
+			return dto.CancelExecutionResponse{
+				TabID:        ts.tabID,
+				ExecID:       execID,
+				Status:       "session_lost",
+				SessionState: dto.SessionLost,
+				Message:      "无法建立旁路取消连接，原会话已停止复用",
+			}
 		}
 	}
 

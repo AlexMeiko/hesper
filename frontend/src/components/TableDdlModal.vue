@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Copy, KeyRound, Loader2, X } from 'lucide-vue-next'
 import { api, parseAppError, RowIdentityKind, type TableDetail } from '@/api/client'
 import { useConnectionsStore } from '@/stores/connections'
@@ -13,6 +13,19 @@ const loading = ref(false)
 const detail = ref<TableDetail | null>(null)
 const ddl = ref('')
 const errorMsg = ref('')
+
+const displayTargetPath = computed(() => {
+  const t = wsStore.ddlTarget
+  if (!t) return ''
+  const active = connStore.getActive(t.connectionId)
+  const parts: string[] = []
+  if (active?.capabilities.hasDatabases !== false && t.database) {
+    parts.push(t.database)
+  }
+  if (t.schema) parts.push(t.schema)
+  parts.push(t.table)
+  return parts.join('.')
+})
 
 watch(
   () => wsStore.ddlTarget,
@@ -69,7 +82,7 @@ async function copyDdl() {
       >
         <div class="space-y-0.5 min-w-0">
           <div class="font-semibold text-sm truncate" style="color: var(--text-primary)">
-            表结构与 DDL · {{ wsStore.ddlTarget.database }}<template v-if="wsStore.ddlTarget.schema">.{{ wsStore.ddlTarget.schema }}</template>.{{ wsStore.ddlTarget.table }}
+            表结构与 DDL · {{ displayTargetPath }}
           </div>
           <div v-if="detail" class="text-[11px] flex items-center gap-2" style="color: var(--text-muted)">
             <span v-if="detail.engine">存储引擎: {{ detail.engine }}</span>

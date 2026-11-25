@@ -23,7 +23,7 @@ import {
 import type { ConnectionDTO, TableSummary } from '@/api/client'
 import { useConnectionsStore } from '@/stores/connections'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { envColorHex } from '@/utils/format'
+import { connectionEndpointSummary, engineLabel, envColorHex } from '@/utils/format'
 
 const connStore = useConnectionsStore()
 const wsStore = useWorkspaceStore()
@@ -52,12 +52,14 @@ async function toggleConn(conn: ConnectionDTO) {
     const res = await connStore.connect(conn.id)
     if (!res) return
     expandedConns.value[conn.id] = true
-    // Auto-expand default database for smooth UX!
-    const dbs = connStore.databasesMap[conn.id] ?? []
-    const defaultDb = res.currentDb || conn.params.defaultDatabase
-    const match = dbs.find((d) => d.name === defaultDb) || dbs.find((d) => !d.isSystem)
-    if (match) {
-      await expandDatabase(conn.id, match.name)
+    if (res.capabilities.hasDatabases) {
+      // Auto-expand default database for multi-database servers
+      const dbs = connStore.databasesMap[conn.id] ?? []
+      const defaultDb = res.currentDb || conn.params.defaultDatabase
+      const match = dbs.find((d) => d.name === defaultDb) || dbs.find((d) => !d.isSystem)
+      if (match) {
+        await expandDatabase(conn.id, match.name)
+      }
     }
     return
   }
@@ -237,11 +239,15 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                 v-if="conn.readOnly"
                 class="w-3 h-3 shrink-0"
                 style="color: var(--warning)"
-                title="已开启客户端只读保护"
+                :title="conn.driver === 'sqlite' ? 'SQLite 引擎级只读模式 (mode=ro)' : '已开启客户端只读保护'"
               />
             </div>
-            <div class="text-[10px] font-mono-tabular truncate" style="color: var(--text-faint)">
-              {{ conn.driver.toUpperCase() }} · {{ conn.params.host }}:{{ conn.params.port }}
+            <div
+              class="text-[10px] font-mono-tabular truncate"
+              style="color: var(--text-faint)"
+              :title="conn.driver === 'sqlite' ? conn.params.filePath : `${conn.params.host}:${conn.params.port}`"
+            >
+              {{ engineLabel(conn.driver) }} · {{ connectionEndpointSummary(conn) }}
               <template v-if="connStore.activeMap[conn.id]">
                 · <span style="color: var(--success)">已连接</span>
               </template>
@@ -257,6 +263,15 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
               @click="wsStore.openQueryTab(conn.id)"
             >
               <Play class="w-3 h-3" />
+            </button>
+            <button
+              v-if="connStore.activeMap[conn.id] && !connStore.activeMap[conn.id]?.capabilities.hasDatabases"
+              type="button"
+              class="btn btn-ghost !w-6 !h-6 !p-0"
+              title="刷新表与视图"
+              @click="connStore.loadObjects(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '', true)"
+            >
+              <RefreshCw class="w-3 h-3" />
             </button>
             <button
               type="button"
@@ -287,9 +302,86 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
           </div>
         </div>
 
-        <!-- Databases Level -->
+        <!-- Case 0: Single-File Engine WITHOUT Databases (SQLite) — Tables & Views directly under Connection -->
         <div
-          v-if="connStore.activeMap[conn.id] && expandedConns[conn.id]"
+          v-if="
+            connStore.activeMap[conn.id] &&
+            expandedConns[conn.id] &&
+            !connStore.activeMap[conn.id]?.capabilities.hasDatabases
+          "
+          class="pl-5 space-y-0.5"
+        >
+          <div
+            v-if="connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.loading"
+            class="px-2 py-1 text-[11px]"
+            style="color: var(--text-muted)"
+          >
+            加载中...
+          </div>
+
+          <template v-else>
+            <div
+              v-for="tbl in filterTables(
+                connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.tables ?? [],
+              )"
+              :key="tbl.name"
+              class="group flex items-center gap-1.5 px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--bg-subtle)]"
+              title="双击实时浏览表数据，右键查看更多操作"
+              @dblclick="wsStore.openTableBrowse(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '', tbl.name)"
+              @contextmenu="
+                openTableContextMenu($event, conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '', tbl.name)
+              "
+            >
+              <Table2 class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
+              <span class="text-xs truncate flex-1">{{ tbl.name }}</span>
+              <button
+                type="button"
+                class="hidden group-hover:inline-flex btn btn-ghost !w-5 !h-5 !p-0"
+                title="查看结构与 DDL"
+                @click.stop="
+                  wsStore.openTableDdl({
+                    connectionId: conn.id,
+                    database: connStore.activeMap[conn.id]?.currentDb || 'main',
+                    schema: '',
+                    table: tbl.name,
+                  })
+                "
+              >
+                <FileCode2 class="w-3 h-3" />
+              </button>
+            </div>
+
+            <div
+              v-for="vw in filterObjectNames(
+                connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.views ?? [],
+              )"
+              :key="`v-${vw.name}`"
+              class="flex items-center gap-1.5 px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--bg-subtle)]"
+              title="双击实时浏览视图"
+              @dblclick="wsStore.openTableBrowse(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '', vw.name)"
+            >
+              <Eye class="w-3.5 h-3.5 shrink-0" style="color: var(--accent-text)" />
+              <span class="text-xs truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
+            </div>
+
+            <div
+              v-if="
+                (connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.tables
+                  ?.length ?? 0) === 0 &&
+                (connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.views
+                  ?.length ?? 0) === 0
+              "
+              class="px-2 py-1 text-[11px]"
+              style="color: var(--text-faint)"
+            >
+              暂无用户表或视图
+            </div>
+          </template>
+        </div>
+
+        <!-- Case 1: Multi-Database Engines (MySQL / MariaDB / PostgreSQL) -->
+        <div
+          v-else-if="connStore.activeMap[conn.id] && expandedConns[conn.id]"
           class="pl-3.5 space-y-0.5"
         >
           <div
@@ -425,7 +517,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
               </div>
             </template>
 
-            <!-- Case B: Engine WITHOUT Schemas (MySQL) -->
+            <!-- Case B: Engine WITHOUT Schemas (MySQL / MariaDB) -->
             <template v-else-if="expandedDbs[connStore.dbKey(conn.id, db.name)]">
               <div class="pl-4 space-y-0.5">
                 <div
@@ -473,6 +565,18 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                   >
                     <Eye class="w-3.5 h-3.5 shrink-0" style="color: var(--accent-text)" />
                     <span class="text-xs truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
+                  </div>
+
+                  <!-- MariaDB Sequences (capabilities.supportsSequences && !hasSchemas) -->
+                  <div
+                    v-for="seq in filterObjectNames(connStore.objectsMap[connStore.objKey(conn.id, db.name, '')]?.sequences ?? [])"
+                    :key="`s-${seq.name}`"
+                    class="flex items-center gap-1.5 px-2 py-1 rounded-md"
+                    style="color: var(--text-muted)"
+                    title="MariaDB 序列 (SEQUENCE)"
+                  >
+                    <Hash class="w-3 h-3 shrink-0" />
+                    <span class="text-[11px] truncate flex-1">{{ seq.name }}</span>
                   </div>
                 </template>
               </div>

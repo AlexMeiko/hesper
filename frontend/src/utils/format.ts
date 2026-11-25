@@ -281,3 +281,35 @@ export function envColorLabel(envColor?: string): string {
       return '默认'
   }
 }
+
+export function engineLabel(driver?: string): string {
+  switch (driver) {
+    case 'mysql':
+      return 'MySQL'
+    case 'postgres':
+      return 'PostgreSQL'
+    case 'mariadb':
+      return 'MariaDB'
+    case 'sqlite':
+      return 'SQLite'
+    default:
+      return (driver || '').toUpperCase()
+  }
+}
+
+export function fileBaseName(filePath?: string): string {
+  const raw = (filePath || '').trim()
+  if (!raw) return ''
+  const parts = raw.split(/[\\/]/)
+  return parts[parts.length - 1] || raw
+}
+
+export function connectionEndpointSummary(conn: {
+  driver: string
+  params: { host?: string; port?: number; filePath?: string }
+}): string {
+  if (conn.driver === 'sqlite') {
+    return fileBaseName(conn.params.filePath) || conn.params.filePath || 'SQLite 文件'
+  }
+  return `${conn.params.host || '127.0.0.1'}:${conn.params.port || 3306}`
+}
