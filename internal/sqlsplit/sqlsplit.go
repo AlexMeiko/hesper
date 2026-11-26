@@ -3,6 +3,7 @@ package sqlsplit
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Dialect selects dialect-specific lexical rules (e.g., MySQL DELIMITER & #, PG $$ quoting).
@@ -40,11 +41,14 @@ type Statement struct {
 	Kind        StatementKind
 	FirstWord   string
 	MutatesData bool // true for write/DDL/CALL/CTE-with-write statements
+	ReturnsRows bool // true when the DB returns a result set (queries, EXPLAIN, MariaDB ANALYZE <stmt>, CALL, RETURNING, CTE-with-SELECT)
+	tokens      []sqlToken
 }
 
 // Split splits SQL text into individual statements using a dialect-aware state machine.
 // Handles single/double/backtick quotes, escaped quotes, line comments (-- and MySQL #),
-// block comments (nested in PG), PostgreSQL $tag$...$tag$ dollar quoting, and MySQL DELIMITER.
+// block comments (nested in PG), MySQL/MariaDB executable comments (/*!...*/ / /*M!...*/),
+// PostgreSQL $tag$...$tag$ dollar quoting, and MySQL DELIMITER.
 func Split(src string, dialect Dialect) []Statement {
 	var stmts []Statement
 	delimiter := ";"
@@ -61,7 +65,12 @@ func Split(src string, dialect Dialect) []Statement {
 		}
 		raw := src[stmtStart:end]
 		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" || isOnlyComments(trimmed, dialect) {
+		if trimmed == "" {
+			stmtStart = -1
+			return
+		}
+		tokens := tokenizeSQL(trimmed, dialect)
+		if len(tokens) == 0 {
 			stmtStart = -1
 			return
 		}
@@ -70,7 +79,7 @@ func Split(src string, dialect Dialect) []Statement {
 		realEnd := realStart + len(trimmed)
 		realStartLine := lineAtOffset(src, realStart)
 		realEndLine := lineAtOffset(src, realEnd)
-		kind, firstWord, mutates := Classify(trimmed, dialect)
+		kind, firstWord, mutates, returnsRows := classifyTokensDetail(tokens, 0, trimmed, dialect)
 		stmts = append(stmts, Statement{
 			Text:        trimmed,
 			StartOffset: realStart,
@@ -80,6 +89,8 @@ func Split(src string, dialect Dialect) []Statement {
 			Kind:        kind,
 			FirstWord:   firstWord,
 			MutatesData: mutates,
+			ReturnsRows: returnsRows,
+			tokens:      tokens,
 		})
 		stmtStart = -1
 	}
@@ -157,8 +168,57 @@ func Split(src string, dialect Dialect) []Statement {
 			continue
 		}
 
-		// Block comment /* ... */ (nested in PostgreSQL)
+		// Block comment /* ... */ (nested in PostgreSQL; MySQL/MariaDB /*! ... */ & /*M! ... */ are executable SQL!)
 		if ch == '/' && i+1 < n && src[i+1] == '*' {
+			if prefixLen := mysqlExecCommentPrefixLen(src, i, dialect); prefixLen > 0 {
+				if stmtStart < 0 {
+					stmtStart = i
+					stmtStartLine = line
+					_ = stmtStartLine
+				}
+				atLineStart = false
+				i += prefixLen
+				for i < n {
+					if src[i] == '\n' {
+						line++
+						i++
+						continue
+					}
+					if src[i] == '\'' || src[i] == '"' || src[i] == '`' {
+						q := src[i]
+						i++
+						for i < n {
+							if src[i] == '\n' {
+								line++
+							}
+							if q != '`' && src[i] == '\\' && i+1 < n {
+								if src[i+1] == '\n' {
+									line++
+								}
+								i += 2
+								continue
+							}
+							if src[i] == q {
+								if i+1 < n && src[i+1] == q {
+									i += 2
+									continue
+								}
+								i++
+								break
+							}
+							i++
+						}
+						continue
+					}
+					if src[i] == '*' && i+1 < n && src[i+1] == '/' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+
 			depth := 1
 			i += 2
 			for i < n && depth > 0 {
@@ -285,9 +345,9 @@ func Split(src string, dialect Dialect) []Statement {
 	return stmts
 }
 
-// StatementAtCursor returns the statement containing cursorOffset, or the nearest preceding statement.
-func StatementAtCursor(src string, cursorOffset int, dialect Dialect) (Statement, bool) {
-	stmts := Split(src, dialect)
+// SelectStatementAtCursor selects the statement containing cursorOffset (or the nearest preceding one)
+// from a pre-split slice of statements.
+func SelectStatementAtCursor(stmts []Statement, cursorOffset int) (Statement, bool) {
 	if len(stmts) == 0 {
 		return Statement{}, false
 	}
@@ -309,59 +369,669 @@ func StatementAtCursor(src string, cursorOffset int, dialect Dialect) (Statement
 	return chosen, true
 }
 
-// Classify inspects leading keywords (skipping comments) to classify statement intent.
+// StatementAtCursor returns the statement containing cursorOffset, or the nearest preceding statement.
+func StatementAtCursor(src string, cursorOffset int, dialect Dialect) (Statement, bool) {
+	return SelectStatementAtCursor(Split(src, dialect), cursorOffset)
+}
+
+// mysqlExecCommentPrefixLen detects MySQL/MariaDB executable conditional comment openers:
+//
+//	/*!...*/ , /*!50000 ...*/ , /*M!...*/ , /*M!100301 ...*/
+//
+// Returns the byte length of the opener prefix (including optional version digits), or 0 if not one.
+func mysqlExecCommentPrefixLen(s string, i int, dialect Dialect) int {
+	if dialect != DialectMySQL || i+2 >= len(s) || s[i] != '/' || s[i+1] != '*' {
+		return 0
+	}
+	j := 0
+	if s[i+2] == '!' {
+		j = i + 3
+	} else if s[i+2] == 'M' && i+3 < len(s) && s[i+3] == '!' {
+		j = i + 4
+	} else {
+		return 0
+	}
+	for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+		j++
+	}
+	return j - i
+}
+
+// HighRiskMatch describes one production high-risk SQL pattern detected by the backend analyzer.
+type HighRiskMatch struct {
+	Kind  string // "drop" | "truncate" | "delete_no_where" | "update_no_where"
+	Label string
+	SQL   string
+}
+
+type sqlTokKind uint8
+
+const (
+	tokWord sqlTokKind = iota
+	tokLParen
+	tokRParen
+	tokComma
+)
+
+type sqlToken struct {
+	kind  sqlTokKind
+	upper string
+	depth int
+}
+
+// tokenizeSQL extracts keywords, parentheses, and commas while skipping non-executable comments,
+// quoted strings, quoted identifiers, and PostgreSQL $tag$...$tag$ dollar-quoted blocks.
+// MySQL/MariaDB executable comments (/*! ... */ and /*M! ... */) are expanded so their tokens are inspected.
+func tokenizeSQL(s string, dialect Dialect) []sqlToken {
+	var out []sqlToken
+	n := len(s)
+	depth := 0
+	inExecComment := false
+	i := 0
+
+	for i < n {
+		ch := s[i]
+
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			i++
+			continue
+		}
+
+		// Closing delimiter of an active MySQL/MariaDB executable comment
+		if inExecComment && ch == '*' && i+1 < n && s[i+1] == '/' {
+			inExecComment = false
+			i += 2
+			continue
+		}
+
+		// Single-line comment --
+		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || dialect != DialectMySQL) {
+			i += 2
+			for i < n && s[i] != '\n' {
+				i++
+			}
+			continue
+		}
+
+		// MySQL # line comment
+		if dialect == DialectMySQL && ch == '#' {
+			i++
+			for i < n && s[i] != '\n' {
+				i++
+			}
+			continue
+		}
+
+		// Block comment /* ... */ (nested in PostgreSQL; MySQL/MariaDB /*! ... */ & /*M! ... */ are expanded)
+		if ch == '/' && i+1 < n && s[i+1] == '*' {
+			if !inExecComment {
+				if prefixLen := mysqlExecCommentPrefixLen(s, i, dialect); prefixLen > 0 {
+					inExecComment = true
+					i += prefixLen
+					continue
+				}
+			}
+			cdepth := 1
+			i += 2
+			for i < n && cdepth > 0 {
+				if dialect == DialectPostgres && s[i] == '/' && i+1 < n && s[i+1] == '*' {
+					cdepth++
+					i += 2
+					continue
+				}
+				if s[i] == '*' && i+1 < n && s[i+1] == '/' {
+					cdepth--
+					i += 2
+					continue
+				}
+				i++
+			}
+			continue
+		}
+
+		// Single-quoted string
+		if ch == '\'' {
+			i++
+			for i < n {
+				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
+					i += 2
+					continue
+				}
+				if s[i] == '\'' {
+					if i+1 < n && s[i+1] == '\'' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
+		// Double-quoted identifier or string (never treated as SQL keyword)
+		if ch == '"' {
+			i++
+			for i < n {
+				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
+					i += 2
+					continue
+				}
+				if s[i] == '"' {
+					if i+1 < n && s[i+1] == '"' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
+		// Backtick identifier (MySQL / SQLite)
+		if ch == '`' && dialect != DialectPostgres {
+			i++
+			for i < n {
+				if s[i] == '`' {
+					if i+1 < n && s[i+1] == '`' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
+		// PostgreSQL dollar-quoted string
+		if dialect == DialectPostgres && ch == '$' {
+			if tag, ok := parseDollarTag(s[i:]); ok {
+				i += len(tag)
+				endIdx := strings.Index(s[i:], tag)
+				if endIdx < 0 {
+					i = n
+				} else {
+					i += endIdx + len(tag)
+				}
+				continue
+			}
+		}
+
+		if ch == '(' {
+			depth++
+			out = append(out, sqlToken{kind: tokLParen, upper: "(", depth: depth})
+			i++
+			continue
+		}
+		if ch == ')' {
+			out = append(out, sqlToken{kind: tokRParen, upper: ")", depth: depth})
+			if depth > 0 {
+				depth--
+			}
+			i++
+			continue
+		}
+		if ch == ',' {
+			out = append(out, sqlToken{kind: tokComma, upper: ",", depth: depth})
+			i++
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isIdentStart(r) || (r >= '0' && r <= '9') {
+			start := i
+			i += size
+			for i < n {
+				nr, nsize := utf8.DecodeRuneInString(s[i:])
+				if isIdentPart(nr) || nr == '$' {
+					i += nsize
+					continue
+				}
+				break
+			}
+			out = append(out, sqlToken{
+				kind:  tokWord,
+				upper: strings.ToUpper(s[start:i]),
+				depth: depth,
+			})
+			continue
+		}
+
+		i += size
+	}
+
+	return out
+}
+
+// unwrapExplainOrMariaAnalyze checks whether tokens represent a wrapper command that ACTUALLY executes
+// its inner statement and returns an execution plan:
+//   - EXPLAIN ANALYZE [VERBOSE] [FORMAT=...] <stmt>
+//   - PostgreSQL EXPLAIN (ANALYZE [true|on|1], ...) <stmt>
+//   - MariaDB ANALYZE [FORMAT=JSON] <SELECT|WITH|UPDATE|DELETE|INSERT|REPLACE|VALUES|(...)>
+//     (explicitly excluding statistics-gathering ANALYZE TABLE / ANALYZE LOCAL / ANALYZE NO_WRITE_TO_BINLOG)
+func unwrapExplainOrMariaAnalyze(tokens []sqlToken, baseDepth int, dialect Dialect) ([]sqlToken, string, bool) {
+	if len(tokens) < 2 || tokens[0].kind != tokWord || tokens[0].depth != baseDepth {
+		return nil, "", false
+	}
+
+	if tokens[0].upper == "EXPLAIN" {
+		// Form 1: PostgreSQL parenthesized options: EXPLAIN (ANALYZE [true|on|1], ...) <stmt>
+		if tokens[1].kind == tokLParen && tokens[1].depth == baseDepth+1 {
+			closeIdx := findMatchingRParen(tokens, 1, baseDepth+1)
+			if closeIdx < 0 || closeIdx+1 >= len(tokens) {
+				return nil, "", false
+			}
+			optTokens := tokens[2:closeIdx]
+			analyzeEnabled := false
+			for i := 0; i < len(optTokens); i++ {
+				if optTokens[i].kind == tokWord && (optTokens[i].upper == "ANALYZE" || optTokens[i].upper == "ANALYSE") {
+					analyzeEnabled = true
+					if i+1 < len(optTokens) && optTokens[i+1].kind == tokWord {
+						next := optTokens[i+1].upper
+						if next == "FALSE" || next == "OFF" || next == "0" {
+							analyzeEnabled = false
+						}
+					}
+					break
+				}
+			}
+			if !analyzeEnabled {
+				return nil, "", false
+			}
+			return tokens[closeIdx+1:], "EXPLAIN", true
+		}
+
+		// Form 2: Unparenthesized EXPLAIN [ANALYZE | ANALYSE] [VERBOSE] [FORMAT=TREE|JSON] <stmt>
+		if tokens[1].kind == tokWord && (tokens[1].upper == "ANALYZE" || tokens[1].upper == "ANALYSE") {
+			idx := 2
+			for idx < len(tokens) && tokens[idx].depth == baseDepth && tokens[idx].kind == tokWord {
+				if tokens[idx].upper == "VERBOSE" {
+					idx++
+					continue
+				}
+				if tokens[idx].upper == "FORMAT" && idx+1 < len(tokens) && tokens[idx+1].depth == baseDepth && tokens[idx+1].kind == tokWord {
+					idx += 2
+					continue
+				}
+				break
+			}
+			if idx < len(tokens) {
+				return tokens[idx:], "EXPLAIN", true
+			}
+		}
+		return nil, "", false
+	}
+
+	// MariaDB ANALYZE [FORMAT=JSON] <statement> (runs the inner statement and returns an execution plan)
+	if dialect == DialectMySQL && tokens[0].upper == "ANALYZE" {
+		idx := 1
+		if idx+1 < len(tokens) && tokens[idx].depth == baseDepth && tokens[idx].kind == tokWord && tokens[idx].upper == "FORMAT" && tokens[idx+1].depth == baseDepth && tokens[idx+1].kind == tokWord {
+			idx += 2
+		}
+		if idx < len(tokens) {
+			if tokens[idx].kind == tokLParen && tokens[idx].depth == baseDepth+1 {
+				return tokens[idx:], "ANALYZE", true
+			}
+			if tokens[idx].kind == tokWord && tokens[idx].depth == baseDepth {
+				switch tokens[idx].upper {
+				case "SELECT", "WITH", "UPDATE", "DELETE", "INSERT", "REPLACE", "VALUES":
+					return tokens[idx:], "ANALYZE", true
+				}
+			}
+		}
+	}
+
+	return nil, "", false
+}
+
+func findMatchingRParen(tokens []sqlToken, lparenIdx int, parenDepth int) int {
+	for i := lparenIdx + 1; i < len(tokens); i++ {
+		if tokens[i].kind == tokRParen && tokens[i].depth == parenDepth {
+			return i
+		}
+	}
+	return -1
+}
+
+// parseCTEs extracts all CTE bodies (at baseDepth+1) and the trailing main statement tokens (at baseDepth)
+// from a WITH [RECURSIVE] ... statement.
+func parseCTEs(tokens []sqlToken, baseDepth int) (cteBodies [][]sqlToken, mainTokens []sqlToken, ok bool) {
+	if len(tokens) < 2 || tokens[0].depth != baseDepth || tokens[0].kind != tokWord || tokens[0].upper != "WITH" {
+		return nil, nil, false
+	}
+	i := 1
+	if i < len(tokens) && tokens[i].depth == baseDepth && tokens[i].kind == tokWord && tokens[i].upper == "RECURSIVE" {
+		i++
+	}
+
+	for i < len(tokens) {
+		// Advance to CTE's AS keyword at baseDepth (skipping CTE name and optional column list "(c1, c2)")
+		for i < len(tokens) && !(tokens[i].depth == baseDepth && tokens[i].kind == tokWord && tokens[i].upper == "AS") {
+			i++
+		}
+		if i >= len(tokens) {
+			return cteBodies, nil, len(cteBodies) > 0
+		}
+		i++ // consume AS
+
+		// Optional PG MATERIALIZED / NOT MATERIALIZED
+		if i < len(tokens) && tokens[i].depth == baseDepth && tokens[i].kind == tokWord && tokens[i].upper == "NOT" {
+			i++
+		}
+		if i < len(tokens) && tokens[i].depth == baseDepth && tokens[i].kind == tokWord && tokens[i].upper == "MATERIALIZED" {
+			i++
+		}
+
+		// Expect CTE body '(' at baseDepth + 1
+		if i >= len(tokens) || tokens[i].kind != tokLParen || tokens[i].depth != baseDepth+1 {
+			return cteBodies, nil, len(cteBodies) > 0
+		}
+		bodyStart := i + 1
+		closeIdx := findMatchingRParen(tokens, i, baseDepth+1)
+		if closeIdx < 0 {
+			return cteBodies, nil, len(cteBodies) > 0
+		}
+
+		cteBodies = append(cteBodies, tokens[bodyStart:closeIdx])
+
+		i = closeIdx + 1
+		if i >= len(tokens) {
+			return cteBodies, nil, true
+		}
+
+		// Skip optional PG SEARCH / CYCLE clauses before ',' or main statement
+		if tokens[i].depth == baseDepth && tokens[i].kind == tokWord && (tokens[i].upper == "SEARCH" || tokens[i].upper == "CYCLE") {
+			for i < len(tokens) {
+				if tokens[i].depth == baseDepth {
+					if tokens[i].kind == tokComma {
+						break
+					}
+					if tokens[i].kind == tokWord {
+						switch tokens[i].upper {
+						case "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES", "TABLE", "WITH":
+							goto afterClause
+						}
+					}
+				} else if tokens[i].depth == baseDepth+1 && tokens[i].kind == tokLParen {
+					// Could be parenthesized main query after SEARCH/CYCLE if previous token wasn't BY/SET/TO/DEFAULT
+					prev := tokens[i-1]
+					if prev.kind == tokWord && prev.upper != "BY" && prev.upper != "SET" && prev.upper != "TO" && prev.upper != "DEFAULT" && prev.upper != "USING" {
+						break
+					}
+				}
+				i++
+			}
+		}
+	afterClause:
+		if i >= len(tokens) {
+			return cteBodies, nil, true
+		}
+		if tokens[i].depth == baseDepth && tokens[i].kind == tokComma {
+			i++
+			continue
+		}
+
+		return cteBodies, tokens[i:], true
+	}
+
+	return cteBodies, nil, len(cteBodies) > 0
+}
+
+// DetectHighRisk inspects one parsed Statement for production high-risk operations per docs/03 §4.2:
+//   - DROP
+//   - TRUNCATE
+//   - DELETE without a WHERE clause at the command's own parenthesis level
+//   - UPDATE without a WHERE clause at the command's own parenthesis level
+//   - EXPLAIN ANALYZE and MariaDB ANALYZE <DML> wrapping any of the above
+//   - Data-modifying CTEs (e.g. PG WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d)
+func DetectHighRisk(stmt Statement, dialect Dialect) []HighRiskMatch {
+	tokens := stmt.tokens
+	if tokens == nil {
+		tokens = tokenizeSQL(stmt.Text, dialect)
+	}
+	var matches []HighRiskMatch
+	inspectHighRiskTokens(tokens, 0, stmt.Text, dialect, &matches)
+	return matches
+}
+
+func inspectHighRiskTokens(tokens []sqlToken, baseDepth int, rawSQL string, dialect Dialect, out *[]HighRiskMatch) {
+	if len(tokens) == 0 {
+		return
+	}
+
+	// Unwrap outer parentheses enclosing the entire command (e.g. "(DELETE FROM t)")
+	for len(tokens) > 0 && tokens[0].kind == tokLParen && tokens[0].depth == baseDepth+1 {
+		closeIdx := findMatchingRParen(tokens, 0, baseDepth+1)
+		if closeIdx == len(tokens)-1 {
+			tokens = tokens[1:closeIdx]
+			baseDepth++
+			continue
+		}
+		break
+	}
+	if len(tokens) == 0 {
+		return
+	}
+
+	if inner, _, ok := unwrapExplainOrMariaAnalyze(tokens, baseDepth, dialect); ok {
+		inspectHighRiskTokens(inner, baseDepth, rawSQL, dialect, out)
+		return
+	}
+
+	if tokens[0].kind != tokWord || tokens[0].depth != baseDepth {
+		return
+	}
+
+	switch tokens[0].upper {
+	case "DROP":
+		*out = append(*out, HighRiskMatch{Kind: "drop", Label: "DROP（删除对象）", SQL: rawSQL})
+		return
+	case "TRUNCATE":
+		*out = append(*out, HighRiskMatch{Kind: "truncate", Label: "TRUNCATE（清空整表）", SQL: rawSQL})
+		return
+	case "DELETE":
+		if !hasWordAtDepth(tokens[1:], baseDepth, "WHERE") {
+			*out = append(*out, HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE（全表删除）", SQL: rawSQL})
+		}
+		return
+	case "UPDATE":
+		if !hasWordAtDepth(tokens[1:], baseDepth, "WHERE") {
+			*out = append(*out, HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE（全表更新）", SQL: rawSQL})
+		}
+		return
+	case "WITH":
+		cteBodies, mainTokens, ok := parseCTEs(tokens, baseDepth)
+		if !ok || len(mainTokens) == 0 {
+			inspectHighRiskFallback(tokens[1:], rawSQL, out)
+			return
+		}
+		for _, body := range cteBodies {
+			inspectHighRiskTokens(body, baseDepth+1, rawSQL, dialect, out)
+		}
+		inspectHighRiskTokens(mainTokens, baseDepth, rawSQL, dialect, out)
+		return
+	}
+}
+
+func isLockingUpdateToken(tokens []sqlToken, idx int) bool {
+	if idx <= 0 || tokens[idx].kind != tokWord || tokens[idx].upper != "UPDATE" {
+		return false
+	}
+	prev := tokens[idx-1]
+	// Matches "FOR UPDATE" and PostgreSQL "FOR NO KEY UPDATE"
+	return prev.kind == tokWord && (prev.upper == "FOR" || prev.upper == "KEY")
+}
+
+func containsWriteKeywordFallback(tokens []sqlToken) bool {
+	for i, t := range tokens {
+		if t.kind != tokWord {
+			continue
+		}
+		switch t.upper {
+		case "INSERT", "DELETE", "MERGE", "REPLACE", "DROP", "TRUNCATE":
+			return true
+		case "UPDATE":
+			if !isLockingUpdateToken(tokens, i) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func inspectHighRiskFallback(tokens []sqlToken, rawSQL string, out *[]HighRiskMatch) {
+	seen := make(map[string]bool)
+	addOnce := func(m HighRiskMatch) {
+		if !seen[m.Kind] {
+			seen[m.Kind] = true
+			*out = append(*out, m)
+		}
+	}
+	for i, t := range tokens {
+		if t.kind != tokWord {
+			continue
+		}
+		switch t.upper {
+		case "DROP":
+			addOnce(HighRiskMatch{Kind: "drop", Label: "DROP（删除对象）", SQL: rawSQL})
+		case "TRUNCATE":
+			addOnce(HighRiskMatch{Kind: "truncate", Label: "TRUNCATE（清空整表）", SQL: rawSQL})
+		case "DELETE":
+			if !hasWordAtDepth(tokens[i+1:], t.depth, "WHERE") {
+				addOnce(HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE（全表删除）", SQL: rawSQL})
+			}
+		case "UPDATE":
+			if !isLockingUpdateToken(tokens, i) && !hasWordAtDepth(tokens[i+1:], t.depth, "WHERE") {
+				addOnce(HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE（全表更新）", SQL: rawSQL})
+			}
+		}
+	}
+}
+
+func hasWordAtDepth(tokens []sqlToken, depth int, word string) bool {
+	for _, t := range tokens {
+		if t.depth == depth && t.kind == tokWord && t.upper == word {
+			return true
+		}
+	}
+	return false
+}
+
+// Classify inspects leading keywords (skipping non-executable comments) to classify statement intent.
 func Classify(stmt string, dialect Dialect) (StatementKind, string, bool) {
-	tokens := extractLeadingWords(stmt, dialect, 8)
+	tokens := tokenizeSQL(stmt, dialect)
 	if len(tokens) == 0 {
 		return KindOther, "", false
 	}
-	first := tokens[0]
+	kind, firstWord, mutates, _ := classifyTokensDetail(tokens, 0, stmt, dialect)
+	return kind, firstWord, mutates
+}
+
+func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect Dialect) (StatementKind, string, bool, bool) {
+	if len(tokens) == 0 {
+		return KindOther, "", false, false
+	}
+
+	// Parenthesized statements like "(SELECT 1) UNION (SELECT 2)" or "(SELECT * FROM t)":
+	// classify by the inner leading statement inside the opening parentheses.
+	if tokens[0].kind == tokLParen && tokens[0].depth == baseDepth+1 {
+		closeIdx := findMatchingRParen(tokens, 0, baseDepth+1)
+		if closeIdx < 0 {
+			closeIdx = len(tokens)
+		}
+		return classifyTokensDetail(tokens[1:closeIdx], baseDepth+1, stmt, dialect)
+	}
+
+	// EXPLAIN ANALYZE and MariaDB ANALYZE <stmt> execute the wrapped statement AND return an execution plan result set.
+	if inner, wrapperWord, ok := unwrapExplainOrMariaAnalyze(tokens, baseDepth, dialect); ok {
+		kind, _, mutates, _ := classifyTokensDetail(inner, baseDepth, stmt, dialect)
+		return kind, wrapperWord, mutates, true
+	}
+
+	var topWords []string
+	for _, t := range tokens {
+		if t.depth == baseDepth && t.kind == tokWord {
+			topWords = append(topWords, t.upper)
+			if len(topWords) >= 8 {
+				break
+			}
+		}
+	}
+	if len(topWords) == 0 {
+		return KindOther, "", false, false
+	}
+	first := topWords[0]
 	second := ""
-	if len(tokens) > 1 {
-		second = tokens[1]
+	if len(topWords) > 1 {
+		second = topWords[1]
 	}
 
 	switch first {
 	case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "VALUES", "TABLE", "PRAGMA":
 		// PRAGMA with '=' in SQLite can mutate settings
 		if first == "PRAGMA" && strings.Contains(stmt, "=") {
-			return KindSet, first, false
+			return KindSet, first, false, false
 		}
-		return KindQuery, first, false
+		return KindQuery, first, false, true
 	case "WITH":
-		// CTE could lead to INSERT/UPDATE/DELETE (data-modifying CTE in PG/MySQL)
-		upper := strings.ToUpper(stripCommentsAndStrings(stmt, dialect))
-		if containsWord(upper, "INSERT") || containsWord(upper, "UPDATE") || containsWord(upper, "DELETE") || containsWord(upper, "MERGE") {
-			return KindWrite, first, true
+		// Inspect CTE bodies and trailing main statement structurally so "WITH ... SELECT ... FOR UPDATE"
+		// stays KindQuery, while data-modifying CTEs (INSERT/UPDATE/DELETE/MERGE) are classified as KindWrite.
+		// If CTE parsing fails on unrecognized syntax, fall back conservatively to keyword scanning.
+		cteBodies, mainTokens, ok := parseCTEs(tokens, baseDepth)
+		if !ok || len(mainTokens) == 0 {
+			if containsWriteKeywordFallback(tokens[1:]) {
+				return KindWrite, first, true, hasWordAtDepth(tokens[1:], baseDepth, "RETURNING")
+			}
+			return KindQuery, first, false, true
 		}
-		return KindQuery, first, false
+		hasWrite := false
+		for _, body := range cteBodies {
+			bKind, _, bMutates, _ := classifyTokensDetail(body, baseDepth+1, stmt, dialect)
+			if bMutates || bKind == KindWrite || bKind == KindDDL {
+				hasWrite = true
+			}
+		}
+		mKind, _, mMutates, mainReturnsRows := classifyTokensDetail(mainTokens, baseDepth, stmt, dialect)
+		if mMutates || mKind == KindWrite || mKind == KindDDL {
+			hasWrite = true
+		}
+		if hasWrite {
+			return KindWrite, first, true, mainReturnsRows
+		}
+		return KindQuery, first, false, true
 	case "BEGIN":
-		return KindBegin, first, false
+		return KindBegin, first, false, false
 	case "START":
 		if second == "TRANSACTION" {
-			return KindBegin, first, false
+			return KindBegin, first, false, false
 		}
-		return KindOther, first, false
+		return KindOther, first, false, false
 	case "COMMIT", "END":
-		return KindCommit, first, false
+		return KindCommit, first, false, false
 	case "ROLLBACK":
-		return KindRollback, first, false
+		return KindRollback, first, false, false
 	case "USE":
-		return KindUse, first, false
+		return KindUse, first, false, false
 	case "SET":
-		return KindSet, first, false
+		return KindSet, first, false, false
 	case "INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE", "CALL", "DO", "LOAD", "COPY":
-		return KindWrite, first, true
+		returnsRows := first == "CALL" || hasWordAtDepth(tokens[1:], baseDepth, "RETURNING")
+		return KindWrite, first, true, returnsRows
 	case "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "LOCK", "ANALYZE", "OPTIMIZE", "VACUUM":
-		return KindDDL, first, true
+		return KindDDL, first, true, false
 	default:
-		return KindOther, first, false
+		return KindOther, first, false, false
 	}
 }
 
 // IsReadOnlyEscapeSet detects SET or SQLite PRAGMA statements trying to disable session read-only mode.
 func IsReadOnlyEscapeSet(stmt string, dialect Dialect) bool {
-	upper := strings.TrimSpace(strings.ToUpper(stripCommentsAndStrings(stmt, dialect)))
+	upper := strings.Join(strings.Fields(strings.ToUpper(stripCommentsAndStrings(stmt, dialect))), " ")
 	if dialect == DialectSQLite && strings.HasPrefix(upper, "PRAGMA") {
 		return strings.Contains(upper, "QUERY_ONLY") || strings.Contains(upper, "WRITABLE_SCHEMA")
 	}
@@ -421,16 +1091,19 @@ func lineAtOffset(src string, offset int) int {
 	return 1 + strings.Count(src[:offset], "\n")
 }
 
-func isOnlyComments(s string, dialect Dialect) bool {
-	return len(extractLeadingWords(s, dialect, 1)) == 0
-}
-
 func stripCommentsAndStrings(s string, dialect Dialect) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	n := len(s)
+	inExecComment := false
 	for i := 0; i < n; {
 		ch := s[i]
+		if inExecComment && ch == '*' && i+1 < n && s[i+1] == '/' {
+			inExecComment = false
+			i += 2
+			b.WriteByte(' ')
+			continue
+		}
 		if ch == '-' && i+1 < n && s[i+1] == '-' {
 			for i < n && s[i] != '\n' {
 				i++
@@ -446,6 +1119,14 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 			continue
 		}
 		if ch == '/' && i+1 < n && s[i+1] == '*' {
+			if !inExecComment {
+				if prefixLen := mysqlExecCommentPrefixLen(s, i, dialect); prefixLen > 0 {
+					inExecComment = true
+					i += prefixLen
+					b.WriteByte(' ')
+					continue
+				}
+			}
 			depth := 1
 			i += 2
 			for i < n && depth > 0 {
@@ -488,43 +1169,4 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 		i++
 	}
 	return b.String()
-}
-
-func extractLeadingWords(s string, dialect Dialect, maxWords int) []string {
-	clean := stripCommentsAndStrings(s, dialect)
-	var words []string
-	var cur strings.Builder
-	for _, r := range clean {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
-			cur.WriteRune(unicode.ToUpper(r))
-		} else if cur.Len() > 0 {
-			words = append(words, cur.String())
-			cur.Reset()
-			if len(words) >= maxWords {
-				return words
-			}
-		}
-	}
-	if cur.Len() > 0 && len(words) < maxWords {
-		words = append(words, cur.String())
-	}
-	return words
-}
-
-func containsWord(upper, word string) bool {
-	idx := 0
-	for {
-		pos := strings.Index(upper[idx:], word)
-		if pos < 0 {
-			return false
-		}
-		start := idx + pos
-		end := start + len(word)
-		leftOK := start == 0 || !isIdentPart(rune(upper[start-1]))
-		rightOK := end == len(upper) || !isIdentPart(rune(upper[end]))
-		if leftOK && rightOK {
-			return true
-		}
-		idx = start + 1
-	}
 }
