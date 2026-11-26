@@ -197,6 +197,7 @@ export interface ConnectionParams {
     "filePath"?: string;
     "tls": TLSConfig;
     "connectTimeoutS"?: number;
+    "errorCharset"?: string;
 }
 
 /**

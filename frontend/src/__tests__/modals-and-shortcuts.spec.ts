@@ -13,7 +13,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { connectionEndpointSummary, engineLabel } from '@/utils/format'
-import { makeQueryTab } from './testHelpers'
+import { makeConnectResult, makeQueryTab } from './testHelpers'
 
 enableAutoUnmount(afterEach)
 
@@ -244,14 +244,30 @@ describe('4-engine workbench & settings modals (MySQL, PostgreSQL, MariaDB, SQLi
     expect(wrapper.text()).not.toContain('主机地址 (Host)')
     expect(wrapper.text()).not.toContain('TLS 加密模式')
 
-    // Switch to MariaDB: restores host/port/TLS and defaults back to port 3306 / root
-    const mariaBtn = buttons.find((b) => b.text().trim() === 'MariaDB')
-    expect(mariaBtn).toBeDefined()
-    await mariaBtn!.trigger('click')
+    // Switch to PostgreSQL: shows optional errorCharset and trims it in requests
+    await buttons.find((b) => b.text().trim() === 'PostgreSQL')!.trigger('click')
+    await wrapper.find('input[placeholder*="GBK"]').setValue(' GBK ')
+    const testSpy = vi.spyOn(api, 'testConnection').mockResolvedValue({
+      success: true,
+      detectedType: EngineType.EnginePostgres,
+      serverVersion: '16.16',
+      latencyMs: 3,
+      capabilities: makeConnectResult().capabilities,
+    })
+    const testBtn = wrapper.findAll('button').find((b) => b.text().trim() === '测试连接')!
+    await testBtn.trigger('click')
+    expect(testSpy.mock.calls[0][0].params.errorCharset).toBe('GBK')
+
+    // Switch to MariaDB: restores host/port/TLS and hides/omits PG-only errorCharset
+    await buttons.find((b) => b.text().trim() === 'MariaDB')!.trigger('click')
 
     expect(wrapper.text()).toContain('主机地址 (Host)')
     expect(wrapper.text()).toContain('TLS 加密模式')
     expect(wrapper.text()).toContain('客户端只读保护')
+    expect(wrapper.text()).not.toContain('连接报错编码（可选）')
+
+    await testBtn.trigger('click')
+    expect(testSpy.mock.calls[1][0].params.errorCharset).toBeUndefined()
   })
 
   it('manages theme (system/light/dark) and fontScale via SettingsModal with persistence', async () => {

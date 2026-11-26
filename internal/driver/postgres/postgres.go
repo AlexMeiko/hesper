@@ -96,15 +96,18 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 
 	conn, err := pgx.ConnectConfig(ctx, pgCfg)
 	if err != nil {
-		return nil, classifyPGError(err)
+		// Authentication failures can arrive before PostgreSQL reports client_encoding.
+		return nil, classifyPGError(err, "", cfg.ErrorCharset)
 	}
 
 	var serverVer, currentDB, currentSchema string
 	var pid int32
 	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version'), current_database(), pg_backend_pid(), COALESCE(current_schema(), '')").
 		Scan(&serverVer, &currentDB, &pid, &currentSchema); err != nil {
+		reported, fallback := pgErrorCharsets(conn, cfg.ErrorCharset)
+		appErr := classifyPGError(err, reported, fallback)
 		_ = conn.Close(ctx)
-		return nil, classifyPGError(err)
+		return nil, appErr
 	}
 
 	connCtx, connCancel := context.WithCancel(context.Background())
@@ -119,6 +122,7 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 		currentSchema: currentSchema,
 		backendPID:    pid,
 		readOnly:      cfg.ReadOnly,
+		errorCharset:  cfg.ErrorCharset,
 	}, nil
 }
 
@@ -179,6 +183,7 @@ type Conn struct {
 	currentSchema string
 	backendPID    int32
 	readOnly      bool
+	errorCharset  string
 	closed        bool
 }
 
@@ -251,7 +256,7 @@ func (c *Conn) WriteSentWithoutResponse() bool {
 }
 
 func (c *Conn) ClassifyError(err error, _ bool) *dto.AppError {
-	return classifyPGError(err)
+	return c.classifyError(err)
 }
 
 // SwitchSchema implements optional driver.SchemaSwitcher for PG search_path.
@@ -262,7 +267,7 @@ func (c *Conn) SwitchSchema(ctx context.Context, schema string) error {
 	q := fmt.Sprintf("SET search_path TO %s, public", QuoteIdent(schema))
 	_, err := c.conn.Exec(ctx, q)
 	if err != nil {
-		return classifyPGError(err)
+		return c.classifyError(err)
 	}
 	c.mu.Lock()
 	c.currentSchema = schema
@@ -320,7 +325,7 @@ func (c *Conn) ListDatabases(ctx context.Context) ([]dto.DatabaseInfo, error) {
 		WHERE d.datistemplate = false
 		ORDER BY d.datname`)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -337,7 +342,7 @@ func (c *Conn) ListDatabases(ctx context.Context) ([]dto.DatabaseInfo, error) {
 			IsSystem:  name == "postgres",
 		})
 	}
-	return out, rows.Err()
+	return out, c.rowsError(rows)
 }
 
 func (c *Conn) ListSchemas(ctx context.Context, _ string) ([]string, error) {
@@ -346,7 +351,7 @@ func (c *Conn) ListSchemas(ctx context.Context, _ string) ([]string, error) {
 		WHERE nspname NOT LIKE 'pg_%' AND nspname <> 'information_schema'
 		ORDER BY nspname`)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -358,7 +363,7 @@ func (c *Conn) ListSchemas(ctx context.Context, _ string) ([]string, error) {
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	return out, c.rowsError(rows)
 }
 
 func (c *Conn) ListTables(ctx context.Context, db, schema string) ([]dto.TableSummary, error) {
@@ -372,7 +377,7 @@ func (c *Conn) ListTables(ctx context.Context, db, schema string) ([]dto.TableSu
 		WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
 		ORDER BY c.relname`, pgx.QueryExecModeExec, schema)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -387,7 +392,7 @@ func (c *Conn) ListTables(ctx context.Context, db, schema string) ([]dto.TableSu
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, c.rowsError(rows)
 }
 
 func (c *Conn) ListViews(ctx context.Context, db, schema string) ([]dto.ObjectSummary, error) {
@@ -401,7 +406,7 @@ func (c *Conn) ListViews(ctx context.Context, db, schema string) ([]dto.ObjectSu
 		WHERE n.nspname = $1 AND c.relkind IN ('v', 'm')
 		ORDER BY c.relname`, pgx.QueryExecModeExec, schema)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -413,7 +418,7 @@ func (c *Conn) ListViews(ctx context.Context, db, schema string) ([]dto.ObjectSu
 		}
 		out = append(out, dto.ObjectSummary{Database: db, Schema: schema, Name: name, Kind: kind})
 	}
-	return out, rows.Err()
+	return out, c.rowsError(rows)
 }
 
 // ListSequences implements optional driver.SequenceInspector (PostgreSQL supports sequences).
@@ -428,7 +433,7 @@ func (c *Conn) ListSequences(ctx context.Context, db, schema string) ([]dto.Obje
 		WHERE n.nspname = $1 AND c.relkind = 'S'
 		ORDER BY c.relname`, pgx.QueryExecModeExec, schema)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -440,7 +445,7 @@ func (c *Conn) ListSequences(ctx context.Context, db, schema string) ([]dto.Obje
 		}
 		out = append(out, dto.ObjectSummary{Database: db, Schema: schema, Name: name, Kind: "sequence"})
 	}
-	return out, rows.Err()
+	return out, c.rowsError(rows)
 }
 
 func (c *Conn) GetTableDetail(ctx context.Context, db, schema, table string) (*dto.TableDetail, error) {
@@ -469,7 +474,7 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, schema, table string) (*d
 		WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, pgx.QueryExecModeExec, schema, table)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -482,7 +487,7 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, schema, table string) (*d
 		col.IsPrimaryKey = pkSet[col.Name]
 		detail.Columns = append(detail.Columns, col)
 	}
-	if err := rows.Err(); err != nil {
+	if err := c.rowsError(rows); err != nil {
 		return nil, err
 	}
 
@@ -557,7 +562,7 @@ func (c *Conn) FetchCompletionCatalog(ctx context.Context, db, schema string) (*
 		WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY c.relname, a.attnum`, pgx.QueryExecModeExec, schema)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -569,7 +574,7 @@ func (c *Conn) FetchCompletionCatalog(ctx context.Context, db, schema string) (*
 		}
 		cat.Tables[t] = append(cat.Tables[t], col)
 	}
-	return cat, rows.Err()
+	return cat, c.rowsError(rows)
 }
 
 func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit dto.TableEditability) (*dto.BrowseTableResponse, error) {
@@ -628,7 +633,7 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 	start := time.Now()
 	rows, err := c.conn.Query(ctx, querySQL)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	fds := rows.FieldDescriptions()
 	cols := make([]dto.ColumnMeta, len(fds))
@@ -650,7 +655,7 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 		row, ok, err := stream.Next(nil)
 		if err != nil {
 			rows.Close()
-			return nil, classifyPGError(err)
+			return nil, c.classifyError(err)
 		}
 		if !ok {
 			break
@@ -701,7 +706,7 @@ func (c *Conn) loadPrimaryKeyColumns(ctx context.Context, schema, table string) 
 		WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
 		ORDER BY k.ord`, pgx.QueryExecModeExec, schema, table)
 	if err != nil {
-		return nil, classifyPGError(err)
+		return nil, c.classifyError(err)
 	}
 	defer rows.Close()
 
@@ -713,7 +718,7 @@ func (c *Conn) loadPrimaryKeyColumns(ctx context.Context, schema, table string) 
 		}
 		cols = append(cols, col)
 	}
-	return cols, rows.Err()
+	return cols, c.rowsError(rows)
 }
 
 // --- RowStream & PG OID Decoding ---
@@ -836,7 +841,42 @@ func QuoteIdent(ident string) string {
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }
 
-func classifyPGError(err error) *dto.AppError {
+func pgErrorCharsets(conn *pgx.Conn, fallback string) (reported, fallbackCharset string) {
+	if conn != nil {
+		cs := conn.PgConn().ParameterStatus("client_encoding")
+		if cs != "" && !strings.EqualFold(cs, "SQL_ASCII") {
+			return cs, fallback
+		}
+	}
+	return "", fallback
+}
+
+func (c *Conn) classifyError(err error) *dto.AppError {
+	reported, fallback := pgErrorCharsets(c.conn, c.errorCharset)
+	return classifyPGError(err, reported, fallback)
+}
+
+func (c *Conn) rowsError(rows pgx.Rows) error {
+	err := rows.Err()
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return c.classifyError(err)
+	}
+	return err
+}
+
+func decodePGError(pgErr *pgconn.PgError, reportedCharset, fallbackCharset string) *pgconn.PgError {
+	decoded := *pgErr
+	decoded.Message = driver.DecodeErrorText(pgErr.Message, reportedCharset, fallbackCharset)
+	decoded.Detail = driver.DecodeErrorText(pgErr.Detail, reportedCharset, fallbackCharset)
+	decoded.Severity = driver.DecodeErrorText(pgErr.Severity, reportedCharset, fallbackCharset)
+	return &decoded
+}
+
+func classifyPGError(err error, reportedCharset, fallbackCharset string) *dto.AppError {
 	if err == nil {
 		return nil
 	}
@@ -846,6 +886,7 @@ func classifyPGError(err error) *dto.AppError {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
+		pgErr = decodePGError(pgErr, reportedCharset, fallbackCharset)
 		switch pgErr.Code {
 		case "57014": // query_canceled
 			return &dto.AppError{

@@ -28,6 +28,7 @@ type ConnectionParams struct {
 	FilePath        string    `json:"filePath,omitempty"` // SQLite only
 	TLS             TLSConfig `json:"tls"`
 	ConnectTimeoutS int       `json:"connectTimeoutS,omitempty"`
+	ErrorCharset    string    `json:"errorCharset,omitempty"`
 }
 
 // ConnectionDTO is the safe frontend representation of a saved connection.

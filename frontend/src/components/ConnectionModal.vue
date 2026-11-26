@@ -27,6 +27,7 @@ const form = reactive({
   filePath: '',
   tlsMode: 'disable',
   connectTimeoutS: 10,
+  errorCharset: '',
 })
 
 const testing = ref(false)
@@ -65,6 +66,7 @@ watch(
       form.filePath = editing.params.filePath || ''
       form.tlsMode = editing.params.tls?.mode || 'disable'
       form.connectTimeoutS = editing.params.connectTimeoutS || 10
+      form.errorCharset = editing.params.errorCharset || ''
     } else {
       form.id = ''
       form.name = ''
@@ -80,6 +82,7 @@ watch(
       form.filePath = ''
       form.tlsMode = 'disable'
       form.connectTimeoutS = 10
+      form.errorCharset = ''
     }
   },
   { immediate: true },
@@ -158,6 +161,7 @@ function buildRequest() {
       filePath: '',
       tls: { mode: form.tlsMode },
       connectTimeoutS: Number(form.connectTimeoutS) || 10,
+      errorCharset: form.driver === EngineType.EnginePostgres ? form.errorCharset.trim() || undefined : undefined,
     },
     password: form.password,
     updatePassword: form.id ? form.password.length > 0 || form.updatePassword : true,
@@ -338,6 +342,10 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
             </select>
           </label>
         </div>
+        <label v-if="form.driver === EngineType.EnginePostgres" class="flex flex-col gap-1.5 text-xs">
+          <span class="text-ink-secondary">连接报错编码（可选）</span>
+          <input v-model="form.errorCharset" type="text" class="input-field font-mono-tabular" placeholder="例如 GBK 或 Windows-1252" />
+        </label>
       </template>
 
       <!-- Read-Only Protection Toggle -->

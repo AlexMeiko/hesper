@@ -82,6 +82,7 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 		ReadOnly:     ent.ReadOnly,
 		TLS:          params.TLS,
 		TimeoutSec:   params.ConnectTimeoutS,
+		ErrorCharset: params.ErrorCharset,
 	}, nil
 }
 
@@ -125,6 +126,11 @@ func (s *ConnectionService) SaveConnection(ctx context.Context, req dto.SaveConn
 			req.Params.Port = 3306
 		}
 	}
+	errorCharset, charsetErr := normalizeAndValidateErrorCharset(req.Driver, req.Params.ErrorCharset)
+	if charsetErr != nil {
+		return dto.ConnectionDTO{}, charsetErr
+	}
+	req.Params.ErrorCharset = errorCharset
 
 	now := time.Now().UnixMilli()
 	id := strings.TrimSpace(req.ID)
@@ -217,6 +223,14 @@ func (s *ConnectionService) DeleteConnection(ctx context.Context, id string) err
 
 // TestConnection validates connectivity using either inline form fields or a saved connection's password.
 func (s *ConnectionService) TestConnection(ctx context.Context, req dto.SaveConnectionRequest) dto.TestConnectionResult {
+	errorCharset, charsetErr := normalizeAndValidateErrorCharset(req.Driver, req.Params.ErrorCharset)
+	if charsetErr != nil {
+		return dto.TestConnectionResult{
+			Success: false,
+			Error:   charsetErr,
+		}
+	}
+
 	pw := req.Password
 	if !req.UpdatePassword && req.ID != "" {
 		if existing, err := s.repo.GetConnection(ctx, req.ID); err == nil && existing != nil && existing.SecretRef != "" {
@@ -238,6 +252,7 @@ func (s *ConnectionService) TestConnection(ctx context.Context, req dto.SaveConn
 		ReadOnly:     req.ReadOnly,
 		TLS:          req.Params.TLS,
 		TimeoutSec:   req.Params.ConnectTimeoutS,
+		ErrorCharset: errorCharset,
 	}
 
 	start := time.Now()
@@ -343,4 +358,15 @@ func asAppError(err error, fallbackCode dto.ErrorCode, fallbackMsg string) *dto.
 		return ae
 	}
 	return dto.NewAppError(fallbackCode, fmt.Sprintf("%s: %s", fallbackMsg, err.Error()), err.Error())
+}
+
+func normalizeAndValidateErrorCharset(engine dto.EngineType, raw string) (string, *dto.AppError) {
+	trimmed := strings.TrimSpace(raw)
+	if engine != dto.EnginePostgres || trimmed == "" {
+		return "", nil
+	}
+	if driver.LookupCharset(trimmed) == nil {
+		return "", dto.NewAppError(dto.ErrInvalidArgument, fmt.Sprintf("不支持的报错编码：%s（例如 GBK、GB18030、Windows-1252）", trimmed), "")
+	}
+	return trimmed, nil
 }
