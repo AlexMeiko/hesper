@@ -2,6 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
@@ -162,6 +166,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		}, nil
 	}
 
+	connID := ts.ConnectionID()
 	dialect := sqlsplit.DialectMySQL
 	switch ts.Dialect() {
 	case dto.EnginePostgres:
@@ -170,15 +175,16 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		dialect = sqlsplit.DialectSQLite
 	}
 
+	allStmts := sqlsplit.Split(req.SQL, dialect)
 	var stmts []sqlsplit.Statement
 	switch req.RunMode {
 	case "current":
-		if st, ok := sqlsplit.StatementAtCursor(req.SQL, req.CursorOffset, dialect); ok {
+		if st, ok := sqlsplit.SelectStatementAtCursor(allStmts, req.CursorOffset); ok {
 			stmts = []sqlsplit.Statement{st}
 		}
 	default:
 		// "all" or "selection"
-		stmts = sqlsplit.Split(req.SQL, dialect)
+		stmts = allStmts
 	}
 	if len(stmts) == 0 {
 		return &dto.ExecuteSQLResponse{
@@ -189,6 +195,56 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 			SessionState:  ts.State(),
 			Error:         dto.NewAppError(dto.ErrInvalidArgument, "未找到可执行的 SQL 语句", ""),
 		}, nil
+	}
+
+	// Production high-risk safeguard (docs/03 §4.2): inspect the exact statements that will execute,
+	// fail closed if connection safety metadata cannot be read, and bind confirmation to a digest
+	// of the exact statements and matched risks using the session's verified ConnectionID.
+	if s.repo != nil {
+		ent, rerr := s.repo.GetConnection(ctx, connID)
+		if rerr != nil || ent == nil {
+			detail := "connection metadata not found"
+			if rerr != nil {
+				detail = rerr.Error()
+			}
+			info := ts.Info()
+			return &dto.ExecuteSQLResponse{
+				TabID:         req.TabID,
+				ExecID:        execID,
+				CurrentDB:     info.CurrentDB,
+				CurrentSchema: info.CurrentSchema,
+				SessionState:  info.SessionState,
+				Error:         dto.NewAppError(dto.ErrInternal, "读取连接安全配置失败，已中止执行", detail),
+			}, nil
+		}
+		if ent.EnvColor == "red" {
+			var risks []dto.HighRiskStatement
+			for _, st := range stmts {
+				for _, m := range sqlsplit.DetectHighRisk(st, dialect) {
+					risks = append(risks, dto.HighRiskStatement{
+						Kind:  m.Kind,
+						Label: m.Label,
+						SQL:   m.SQL,
+					})
+				}
+			}
+			if len(risks) > 0 {
+				expectedToken := computeHighRiskConfirmToken(connID, req.TabID, stmts, risks)
+				if req.ConfirmToken == "" || subtle.ConstantTimeCompare([]byte(req.ConfirmToken), []byte(expectedToken)) != 1 {
+					info := ts.Info()
+					return &dto.ExecuteSQLResponse{
+						TabID:              req.TabID,
+						ExecID:             execID,
+						CurrentDB:          info.CurrentDB,
+						CurrentSchema:      info.CurrentSchema,
+						SessionState:       info.SessionState,
+						RequiresConfirm:    true,
+						ConfirmToken:       expectedToken,
+						HighRiskStatements: risks,
+					}, nil
+				}
+			}
+		}
 	}
 
 	// Release previous snapshots for this tab when starting a new execution.
@@ -218,7 +274,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 				return nil
 			}
 			hasColumns = true
-			builder := s.resMgr.NewBuilder(req.TabID, req.ConnectionID, cols)
+			builder := s.resMgr.NewBuilder(req.TabID, connID, cols)
 			for {
 				row, ok, nextErr := stream.Next(builder.RegisterBlob)
 				if nextErr != nil {
@@ -266,7 +322,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		}
 
 		resp.Statements = append(resp.Statements, stmtRes)
-		s.recordHistory(ctx, req.ConnectionID, outcome.CurrentDB, stmt.Text, stmtRes)
+		s.recordHistory(ctx, connID, outcome.CurrentDB, stmt.Text, stmtRes)
 
 		if outcome.Error != nil {
 			resp.Error = outcome.Error
@@ -278,8 +334,28 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 	resp.CurrentDB = info.CurrentDB
 	resp.CurrentSchema = info.CurrentSchema
 	resp.SessionState = info.SessionState
+	resp.ExecutedAll = req.RunMode != "selection" && resp.Error == nil && len(resp.Statements) == len(allStmts)
 	resp.TotalMs = time.Since(totalStart).Milliseconds()
 	return resp, nil
+}
+
+func computeHighRiskConfirmToken(connID, tabID string, stmts []sqlsplit.Statement, risks []dto.HighRiskStatement) string {
+	h := sha256.New()
+	writePart := func(s string) {
+		_, _ = fmt.Fprintf(h, "%d:%s|", len(s), s)
+	}
+	writePart(connID)
+	writePart(tabID)
+	_, _ = fmt.Fprintf(h, "stmts=%d|", len(stmts))
+	for _, st := range stmts {
+		writePart(st.Text)
+	}
+	_, _ = fmt.Fprintf(h, "risks=%d|", len(risks))
+	for _, r := range risks {
+		writePart(r.Kind)
+		writePart(r.SQL)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // FetchResultPage slices a subsequent page from an existing Execute-Once snapshot WITHOUT re-running SQL.

@@ -266,7 +266,7 @@ export interface ExecuteSQLRequest {
     "sql": string;
 
     /**
-     * >=0 when RunMode == "current"
+     * UTF-8 byte offset >=0 when RunMode == "current"
      */
     "cursorOffset": number;
 
@@ -279,6 +279,11 @@ export interface ExecuteSQLRequest {
      * initial page size returned from snapshot
      */
     "pageSize": number;
+
+    /**
+     * backend-issued token binding confirmation to exact high-risk statements
+     */
+    "confirmToken"?: string;
 }
 
 /**
@@ -291,7 +296,11 @@ export interface ExecuteSQLResponse {
     "currentSchema"?: string;
     "sessionState": SessionState;
     "statements": StatementResult[] | null;
+    "executedAll"?: boolean;
     "totalMs": number;
+    "requiresConfirm"?: boolean;
+    "confirmToken"?: string;
+    "highRiskStatements"?: HighRiskStatement[] | null;
     "error"?: AppError | null;
 }
 
@@ -325,6 +334,15 @@ export interface FetchResultPageResponse {
     "hasMorePages": boolean;
     "truncatedByLimit": boolean;
     "limitReason"?: string;
+}
+
+/**
+ * HighRiskStatement describes one backend-identified high-risk statement requiring explicit user confirmation.
+ */
+export interface HighRiskStatement {
+    "kind": string;
+    "label": string;
+    "sql": string;
 }
 
 /**

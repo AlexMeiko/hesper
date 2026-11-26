@@ -74,42 +74,54 @@ type ExecuteSQLRequest struct {
 	Database     string `json:"database,omitempty"`
 	Schema       string `json:"schema,omitempty"`
 	SQL          string `json:"sql"`
-	CursorOffset int    `json:"cursorOffset"` // >=0 when RunMode == "current"
-	RunMode      string `json:"runMode"`      // "current" | "all" | "selection"
-	PageSize     int    `json:"pageSize"`     // initial page size returned from snapshot
+	CursorOffset int    `json:"cursorOffset"`           // UTF-8 byte offset >=0 when RunMode == "current"
+	RunMode      string `json:"runMode"`                // "current" | "all" | "selection"
+	PageSize     int    `json:"pageSize"`               // initial page size returned from snapshot
+	ConfirmToken string `json:"confirmToken,omitempty"` // backend-issued token binding confirmation to exact high-risk statements
+}
+
+// HighRiskStatement describes one backend-identified high-risk statement requiring explicit user confirmation.
+type HighRiskStatement struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+	SQL   string `json:"sql"`
 }
 
 // StatementResult represents the outcome of one executed statement in a query batch.
 type StatementResult struct {
-	Index            int          `json:"index"`
-	SQL              string       `json:"sql"`
-	StartLine        int          `json:"startLine"`
-	IsResultSet      bool         `json:"isResultSet"`
-	ResultID         string       `json:"resultId,omitempty"`
-	Columns          []ColumnMeta `json:"columns,omitempty"`
+	Index            int           `json:"index"`
+	SQL              string        `json:"sql"`
+	StartLine        int           `json:"startLine"`
+	IsResultSet      bool          `json:"isResultSet"`
+	ResultID         string        `json:"resultId,omitempty"`
+	Columns          []ColumnMeta  `json:"columns,omitempty"`
 	Rows             [][]CellValue `json:"rows,omitempty"`
-	Page             int          `json:"page,omitempty"`
-	PageSize         int          `json:"pageSize,omitempty"`
-	TotalBuffered    int64        `json:"totalBuffered,omitempty"`
-	HasMorePages     bool         `json:"hasMorePages,omitempty"`
-	TruncatedByLimit bool         `json:"truncatedByLimit,omitempty"`
-	LimitReason      string       `json:"limitReason,omitempty"`
-	AffectedRows     int64        `json:"affectedRows"`
-	DurationMs       int64        `json:"durationMs"`
-	WarningMessage   string       `json:"warningMessage,omitempty"`
-	Error            *AppError    `json:"error,omitempty"`
+	Page             int           `json:"page,omitempty"`
+	PageSize         int           `json:"pageSize,omitempty"`
+	TotalBuffered    int64         `json:"totalBuffered,omitempty"`
+	HasMorePages     bool          `json:"hasMorePages,omitempty"`
+	TruncatedByLimit bool          `json:"truncatedByLimit,omitempty"`
+	LimitReason      string        `json:"limitReason,omitempty"`
+	AffectedRows     int64         `json:"affectedRows"`
+	DurationMs       int64         `json:"durationMs"`
+	WarningMessage   string        `json:"warningMessage,omitempty"`
+	Error            *AppError     `json:"error,omitempty"`
 }
 
 // ExecuteSQLResponse carries all statement results and the authoritative post-execution SessionState.
 type ExecuteSQLResponse struct {
-	TabID        string            `json:"tabId"`
-	ExecID       string            `json:"execId"`
-	CurrentDB    string            `json:"currentDb"`
-	CurrentSchema string           `json:"currentSchema,omitempty"`
-	SessionState SessionState      `json:"sessionState"`
-	Statements   []StatementResult `json:"statements"`
-	TotalMs      int64             `json:"totalMs"`
-	Error        *AppError         `json:"error,omitempty"`
+	TabID              string              `json:"tabId"`
+	ExecID             string              `json:"execId"`
+	CurrentDB          string              `json:"currentDb"`
+	CurrentSchema      string              `json:"currentSchema,omitempty"`
+	SessionState       SessionState        `json:"sessionState"`
+	Statements         []StatementResult   `json:"statements"`
+	ExecutedAll        bool                `json:"executedAll,omitempty"`
+	TotalMs            int64               `json:"totalMs"`
+	RequiresConfirm    bool                `json:"requiresConfirm,omitempty"`
+	ConfirmToken       string              `json:"confirmToken,omitempty"`
+	HighRiskStatements []HighRiskStatement `json:"highRiskStatements,omitempty"`
+	Error              *AppError           `json:"error,omitempty"`
 }
 
 // FetchResultPageRequest reads a page from an Execute-Once snapshot WITHOUT re-running SQL.
