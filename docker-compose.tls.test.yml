@@ -1,0 +1,36 @@
+# Docker Compose override enabling custom-CA TLS & mTLS across MySQL 8.4, MariaDB 11.4, and PostgreSQL 16.
+# Usage:
+#   ./scripts/gen-test-tls-certs.sh
+#   docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml up -d --wait
+#   SQLM_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/mysql ./internal/driver/postgres ./internal/service
+#   docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml down -v
+
+services:
+  mysql:
+    volumes:
+      - ./test/mysql/02_tls_init.sql:/docker-entrypoint-initdb.d/02_tls_init.sql:ro
+      - ./test/.tls-certs:/tls-certs:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-storage-engine=InnoDB
+      - --log-bin-trust-function-creators=1
+      - --ssl-ca=/tls-certs/ca.crt
+      - --ssl-cert=/tls-certs/server.crt
+      - --ssl-key=/tls-certs/server.key
+
+  postgres:
+    volumes:
+      - ./test/postgres/02_tls_init.sh:/docker-entrypoint-initdb.d/02_tls_init.sh:ro
+      - ./test/.tls-certs:/tls-certs:ro
+
+  mariadb:
+    volumes:
+      - ./test/mariadb/02_tls_init.sql:/docker-entrypoint-initdb.d/02_tls_init.sql:ro
+      - ./test/.tls-certs:/tls-certs:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --ssl-ca=/tls-certs/ca.crt
+      - --ssl-cert=/tls-certs/server.crt
+      - --ssl-key=/tls-certs/server.key

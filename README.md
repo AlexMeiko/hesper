@@ -2,7 +2,7 @@
 
 面向 **MySQL、PostgreSQL、MariaDB 和 SQLite** 的轻量级跨平台桌面数据库工作台，基于 **Go + Wails v3 + Vue 3** 构建。
 
-> **当前交付范围（Phase 1A + 1B + 1C · Gate 1 达成）**：完整可运行的 **四库统一查询工作台**，已在真实 **MySQL 8.4.13 (InnoDB)**、真实 **PostgreSQL 16.16**、真实 **MariaDB 11.4.13** 与内嵌纯 Go **SQLite 3.54.1** 上完成全量端到端查询、取消、只读与翻页验收，正式达成 **Gate 1**。网格行内写入与 SSH 隧道（Phase 2）、跨库表设计器（Phase 3）按既定路线图留待后续阶段。
+> **当前交付范围（Phase 1A–1C · Gate 1 达成 + Phase 2C SSH 隧道池与完整 SSL/TLS/mTLS）**：完整可运行的 **四库统一查询工作台**，已在真实 **MySQL 8.4 (InnoDB)**、真实 **PostgreSQL 16**、真实 **MariaDB 11.4** 与内嵌纯 Go **SQLite 3.54.1** 上完成全量端到端查询、取消、只读、翻页及 **SSH 隧道 + TLS/mTLS（`verify-ca`/`verify-full`/客户端证书/禁明文降级/慢查询取消）** 实测验收。网格行内写入（Phase 2A/2B）与跨库表设计器（Phase 3）按既定路线图留待后续阶段。
 
 ---
 
@@ -60,6 +60,15 @@ docker compose -f docker-compose.test.yml up -d --wait
 停止并清理测试容器：
 ```bash
 docker compose -f docker-compose.test.yml down -v
+```
+
+如需一并验证 **自定义 CA / `verify-ca` / `verify-full` / mTLS 客户端证书** 与 **SSH 隧道全链路集成测试**：
+```bash
+./scripts/gen-test-tls-certs.sh
+docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml up -d --wait
+SQLM_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/... ./internal/tunnel ./internal/session ./internal/service
+docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml down -v
+rm -rf test/.tls-certs
 ```
 
 ### 2. 生成 Bindings、构建前端与桌面二进制
@@ -133,14 +142,16 @@ cd frontend && pnpm test
 | **MariaDB Gate 1 全量验收** | `TestMariaDB114_Gate1_FullAcceptance` | **真实 MariaDB 11.4.13** | **通过** | `DetectedType=mariadb`、`SupportsSequences=true` 并枚举原生 `order_seq`/`invoice_seq`；旁路 `KILL QUERY` 取消慢查询保留连接/事务/临时表 + 3 轮迟到取消竞态；原生 `INSERT ... RETURNING *` Execute-Once 翻页；磁盘溢写与过期提示；MyISAM/无主键三维度可编辑性判定；极限数值/`NULL`/BLOB 保真；真实 `sqlm_ro` 拒写；TCP 断线报 `ERR_COMMIT_OUTCOME_UNKNOWN` |
 | **SQLite Gate 1 + 3.2 `VACUUM` 回归** | `TestSQLite354_Gate1_AcceptanceAndVacuumRowidRegression` | **真实 SQLite 3.54.1 文件库** | **通过** | 不存在路径报错且不静默建空库；`HasDatabases=false`/`HasSchemas=false`/`SupportsSequences=false`/`DDLTransactional=true`；**复现 `VACUUM` 导致无主键表隐式 `rowid` 从 `2 → 1` 偏移，回归断言无显式主键表与部分唯一索引表严格返回 `RowIdentityNone`，显式 `INTEGER PRIMARY KEY` / 全列非空唯一键正确通过**；引擎级 `mode=ro` 直写拒写 + 拦截 `PRAGMA query_only = OFF`；递归 CTE 慢查询中断并保留原事务与临时表；`INSERT ... RETURNING *` Execute-Once；数值/`NULL`/BLOB 保真与 `CloseTab` 零泄漏 |
 | **取消与断线边界纯单测** | `TestUnconfirmedCancelMarksSessionLost`、`TestDropAfterWriteReturnsCommitOutcomeUnknown` | `driver/fake` 纯单测（不计作真库） | **通过** | 验证未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 状态机兜底 |
-| **前端保真、安全与四库交互** | `frontend/src/__tests__/*.spec.ts` | Vitest (`happy-dom`) | **通过 (34/34)** | `DataGrid` 原样渲染极限 `BIGINT`/`DECIMAL`、截断徽标、行/列双虚拟化、后台结果切换滚动重置与方言 `INSERT SQL` / 导出边界提示；`NULL` / `""` / 不可见空白符开关；`useShortcuts` 全局 `Esc` 浮窗优先（含 `CommandPalette`）防误取消；弹窗焦点陷阱与恢复；后端令牌绑定生产高危 SQL 二次确认与 `executedAll` 脏状态追踪；`USE` 切库补全刷新；`ExplorerSidebar` 展平虚拟树与断开确认；请求去重、同连接生命周期串行化与防乱序覆写；CodeMirror 中文 UTF-8 光标偏移与切页状态保留 |
-| **基础组件单元测试** | `internal/sqlsplit`、`internal/service`、`internal/session`、`internal/resultbuf`、`internal/repository` | Go `-race` 纯单测 | **通过** | 四库方言切分（含 MySQL/MariaDB `/*! ... */` / `/*M! ... */` 可执行注释）、括号查询/`EXPLAIN ANALYZE`/MariaDB `ANALYZE`/CTE `FOR UPDATE` 分类与 `Query` 路由校验、生产高危令牌门禁与 fail-closed 保护、内存→JSONL 磁盘溢写/硬上限/TTL 过期、`app.db` CRUD/历史/KV |
+| **SSH 隧道池、通道适配与凭据契约** | `internal/tunnel`、`internal/session`、`internal/service` | Go `-race` 故障注入与并发单测 | **通过** | `tunnelConn` 真实 `RemoteAddr` / 非破坏性读超时 / 写超时精确部分写入 `n` 与独立宽限期无死锁升级；原子 KV TOFU 指纹；加密私钥与 Agent 取消释放；黑洞心跳超时回收；按 `authDigest` 隔离的并发共享握手；`Disconnect` 保留已保存凭据、认证前勾选覆盖保存（不推进 `configVer` / 不关闭活隧道）及并发编辑/删除写锁保护；`CommitOutcomeUnknown` 全入口（含 `ForceAbort`）不降级与 Track A/B 代次清理 |
+| **真实三库 SSH + TLS/mTLS 验收** | `TestRealDB_SSH_TLS_mTLS_VerifyModes`、`TestRealDB_StrictTLS_ForbidsPlaintextDowngrade`、`TestRealDB_SSH_TLS_SlowQueryCancelExecution`、`TestRealDB_SSH_TunnelDrop_MarksSessionLostAndReconnects` | **真实 MySQL 8.4 + MariaDB 11.4 + PostgreSQL 16 (Docker TLS/mTLS)** | **通过** | 经内嵌 Go SSH Server 实测三库 TOFU、`verify-ca` 远端不可本地解析别名（含 PG `LookupFunc` 透传）、不可信 CA 拒绝、`verify-full` 主机名校验、真 mTLS（`REQUIRE X509` / `hostssl cert clientcert=verify-full` 无证书/错 CA 拒绝、合法客户端证书通过）、无 SSL 代理下 `prefer` 回退与 `require`/`verify-ca`/`verify-full` 严禁明文降级、SSH 隧道慢查询 `CancelExecution`（含真实 PG `CancelRequest`）及断线后台事件与重连 |
+| **前端保真、安全与四库交互** | `frontend/src/__tests__/*.spec.ts` | Vitest (`happy-dom`) | **通过 (41/41)** | `DataGrid` 原样渲染极限 `BIGINT`/`DECIMAL`、截断徽标、行/列双虚拟化、后台结果切换滚动重置与方言 `INSERT SQL` / 导出边界提示；`NULL` / `""` / 不可见空白符开关；`useShortcuts` 全局 `Esc` 浮窗优先（含 `CommandPalette`、`SSHSecretModal`）防误取消；弹窗焦点陷阱与恢复；后端令牌绑定生产高危 SQL 二次确认与 `executedAll` 脏状态追踪；`USE` 切库补全刷新；`ExplorerSidebar` 展平虚拟树与断开确认；`sessionEpoch` 严格版本门禁（含拒收 `epoch=0`/迟到响应）、空闲标签断线事件与全入口 SSH 指纹/密码重试闭环；CodeMirror 中文 UTF-8 光标偏移与切页状态保留 |
+| **基础组件单元测试** | `internal/driver`、`internal/sqlsplit`、`internal/resultbuf`、`internal/repository` | Go `-race` 纯单测 | **通过** | 共享 `ValidateTLSConfig`/`BuildTLSConfig` 与 MySQL/PG TLS 配置无回退测试；四库方言切分（含 MySQL/MariaDB `/*! ... */` / `/*M! ... */` 可执行注释）、括号查询/`EXPLAIN ANALYZE`/MariaDB `ANALYZE`/CTE `FOR UPDATE` 分类与 `Query` 路由校验、生产高危令牌门禁与 fail-closed 保护、内存→JSONL 磁盘溢写/硬上限/TTL 过期、`app.db` CRUD/历史/KV |
 
 ### 未验证项目（明确标注为 `待验证`）
 
 - **数据库版本**：MySQL `8.0` / `5.7`（`待验证`）；PostgreSQL `17` / `14` / `12`（`待验证`）；MariaDB `10.5`（`待验证`）。
-- **功能阶段**：网格行内写入与并发冲突检测（Phase 2，`待验证`）；跨库表设计器、五态迁移报告与 SQLite 可写视图 `INSTEAD OF` 触发器重建（Phase 3，`待验证`）；SSH 隧道与高级 SSL 双向证书（Phase 2，`待验证`）。
-- **桌面平台实机验收**：Windows 10/11 WebView2 编译打包与实机运行（`待验证`）；macOS 适配（Phase 4，`待验证`）。
+- **功能阶段**：网格行内写入与并发冲突检测（Phase 2A/2B，`待验证`）；跨库表设计器、五态迁移报告与 SQLite 可写视图 `INSTEAD OF` 触发器重建（Phase 3，`待验证`）。
+- **桌面平台实机验收**：Windows 10/11 WebView2 编译打包、OpenSSH Agent 命名管道 `\\.\pipe\openssh-ssh-agent` 实机握手（Linux 侧已通过 `GOOS=windows` 交叉编译检查，实机运行`待验证`）；桌面端文件选择器与 SSH/TLS 弹窗 UI 实机冒烟（`待验证`）；macOS 适配（Phase 4，`待验证`）。
 
 ---
 
@@ -150,17 +161,20 @@ cd frontend && pnpm test
 sql-manager/
 ├── main.go                                    # 最小入口：路径解析 → Linux 图形自检 → bootstrap.Run
 ├── docker-compose.test.yml                    # MySQL 8.4 + PostgreSQL 16 + MariaDB 11.4 真实测试库编排
+├── docker-compose.tls.test.yml                # 叠加启用自定义 CA / TLS / mTLS 的真实三库测试编排
 ├── Taskfile.yml                               # 标准化构建、bindings 生成与测试任务
+├── scripts/gen-test-tls-certs.sh              # 生成临时测试 PKI（写入被 git 忽略的 test/.tls-certs/）
 ├── scripts/package-appimage.sh                # 精简 Linux x86_64 GTK4 AppImage 打包脚本（含缺库 GUI 弹窗）
 ├── sql/001_init.sql                           # 本地元数据配置库 app.db Schema
-├── test/{mysql,postgres,mariadb}/init.sql     # 真实数据库测试表、只读账号与边界数据集
+├── test/{mysql,postgres,mariadb}/             # 真实数据库测试表、只读账号、mTLS 初始化与边界数据集
 ├── docs/                                      # 架构、引擎契约、交互规范与路线图设计文档
 ├── internal/
 │   ├── bootstrap/                             # Composition Root（Wails v3 生命周期、四库静态注册与文件选择器）
 │   ├── binding/                               # 极薄 Wails v3 方法适配器与 /stream HTTP Handler
-│   ├── service/                               # 纯 Go 用例编排（零 Wails 依赖，含生产高危 SQL 确认门禁）
-│   ├── session/                               # Track A 元数据池 + Track B 独占会话与取消栅栏
-│   ├── driver/                                # 消费侧小接口、TrackedConn 与 mysql(含MariaDB)/postgres/sqlite/fake
+│   ├── service/                               # 纯 Go 用例编排（零 Wails 依赖，含 SSH 凭据生命周期与生产高危确认门禁）
+│   ├── tunnel/                                # 零本地端口 SSH 隧道池、tunnelConn 通道适配、TOFU Known Hosts 与 SSH Agent
+│   ├── session/                               # Track A 元数据池 + Track B 独占会话、全局 sessionEpoch 与取消栅栏
+│   ├── driver/                                # 消费侧小接口、共享 TLS/mTLS 构造、TrackedConn 与四库驱动
 │   ├── resultbuf/                             # Execute-Once 内存/磁盘溢写快照与大对象流式缓存
 │   ├── sqlsplit/                              # 四库方言切分、语句分类、高危 SQL 识别与只读逃逸识别
 │   ├── repository/                            # 本地 app.db SQLite 仓储
@@ -168,14 +182,14 @@ sql-manager/
 │   ├── platform/                              # Linux Wayland/NVIDIA 启动前图形降级保护
 │   ├── config/                                # XDG / AppData / Portable 路径解析
 │   ├── entity/                                # 本地持久化实体
-│   └── dto/                                   # 稳定跨边界 DTO 与结构化 AppError
+│   └── dto/                                   # 稳定跨边界 DTO、会话状态事件与结构化 AppError
 └── frontend/
-    ├── bindings/                              # wails3 自动生成的强类型 TS Bindings
+    ├── bindings/                              # wails3 自动生成的强类型 TS Bindings 与事件定义
     └── src/
-        ├── api/                               # types.ts（纯 DTO/枚举）与 client.ts（懒加载 RPC + AppError 归一化）
+        ├── api/                               # types.ts（纯 DTO/枚举）与 client.ts（懒加载 RPC、事件订阅与 AppError 归一化）
         ├── composables/                       # useShortcuts（统一快捷键与 Esc 浮窗优先）/ useDragResize
         ├── stores/                            # Pinia：settings / ui / schema / connections / workspace
-        ├── utils/                             # format / tableMeta / clipboard
-        ├── components/                        # BaseModal / ConfirmDialog / ToastHost / PaginationBar / CellText 及工作台视图
-        └── __tests__/                         # Vitest 保真、安全语义与四库界面单测
+        ├── utils/                             # format / tableMeta / clipboard / sshChallenge
+        ├── components/                        # BaseModal / ConfirmDialog / SSHSecretModal / ToastHost / CellText 及工作台视图
+        └── __tests__/                         # Vitest 保真、安全语义、SSH/TLS 闭环与版本门禁单测
 ```

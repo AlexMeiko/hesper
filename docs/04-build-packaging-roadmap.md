@@ -98,7 +98,8 @@
 - [x] **Gate 1 门禁达成**：MySQL `8.4.13`、PostgreSQL `16.16`、MariaDB `11.4.13`、SQLite `3.54.1` 全部通过查询/取消/只读/翻页实测验收，可正式进入 Phase 2。
 
 ### Phase 2：安全网格写入、SSH 隧道与智能补全 — 门禁 Gate 2（2–3 周）
-- [ ] 实现 SSH 隧道池与完整 SSL 模式；实现后端 `InspectTableEditability` 三维度判定、`internal/changeset` 参数化 `ChangePlan` 与乐观并发冲突检测（MySQL 开启 `clientFoundRows=true`）。
+- [x] **Phase 2C（已完成真库验收）**：实现零本地监听端口 SSH 隧道池（TOFU 指纹、可选长效保存/每次输入/弹窗覆盖保存、`tunnelConn` 通道超时与防死锁升级）与完整 5 模式 SSL/TLS（含 `verify-ca` 证书链严校、`verify-full`、`mTLS`、禁明文降级），并在真实 MySQL 8.4 / MariaDB 11.4 / PostgreSQL 16 Docker 集群完成全链路实测。
+- [ ] 实现后端 `InspectTableEditability` 三维度判定、`internal/changeset` 参数化 `ChangePlan` 与乐观并发冲突检测（MySQL 开启 `clientFoundRows=true`）。
 - [ ] 上线网格行内编辑（无稳定键仅允许新增、SQLite 禁隐式 `rowid`、MyISAM 禁整批提交、冲突保留草稿）、Value Inspector、基于 Schema 的 SQL 自动补全、查询历史与生产高危 SQL 二次确认。
 - [ ] **Gate 2 门禁**：通过 3.1“网格写入”全部场景与 3.2 的 `VACUUM` `rowid` 回归用例（行定位判定部分已于 Phase 1C 回归通过，Phase 2 补齐端到端写入校验）。
 
