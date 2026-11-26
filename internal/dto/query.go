@@ -115,6 +115,7 @@ type ExecuteSQLResponse struct {
 	CurrentDB          string              `json:"currentDb"`
 	CurrentSchema      string              `json:"currentSchema,omitempty"`
 	SessionState       SessionState        `json:"sessionState"`
+	SessionEpoch       int64               `json:"sessionEpoch,omitempty"`
 	Statements         []StatementResult   `json:"statements"`
 	ExecutedAll        bool                `json:"executedAll,omitempty"`
 	TotalMs            int64               `json:"totalMs"`
@@ -150,18 +151,31 @@ type CancelExecutionResponse struct {
 	ExecID       string       `json:"execId"`
 	Status       string       `json:"status"` // "canceled" | "noop" | "session_lost" | "pending_force"
 	SessionState SessionState `json:"sessionState"`
+	SessionEpoch int64        `json:"sessionEpoch,omitempty"`
 	Message      string       `json:"message"`
 }
 
 // TabSessionInfo reports current dedicated session metadata for UI display.
 type TabSessionInfo struct {
-	TabID         string       `json:"tabId"`
-	ConnectionID  string       `json:"connectionId"`
-	CurrentDB     string       `json:"currentDb"`
-	CurrentSchema string       `json:"currentSchema,omitempty"`
-	SessionState  SessionState `json:"sessionState"`
-	ServerConnID  string       `json:"serverConnId,omitempty"`
-	ReadOnly      bool         `json:"readOnly"`
+	TabID           string       `json:"tabId"`
+	ConnectionID    string       `json:"connectionId"`
+	CurrentDB       string       `json:"currentDb"`
+	CurrentSchema   string       `json:"currentSchema,omitempty"`
+	SessionState    SessionState `json:"sessionState"`
+	SessionEpoch    int64        `json:"sessionEpoch,omitempty"`
+	ServerConnID    string       `json:"serverConnId,omitempty"`
+	ReadOnly        bool         `json:"readOnly"`
+	CredentialSaved bool         `json:"credentialSaved,omitempty"`
+	SaveWarning     string       `json:"saveWarning,omitempty"`
+}
+
+// SessionStateEvent is emitted asynchronously over the Wails event bus whenever a tab's
+// physical session state changes in the background (e.g. SSH tunnel disconnect).
+type SessionStateEvent struct {
+	TabID        string       `json:"tabId"`
+	ConnectionID string       `json:"connectionId"`
+	SessionState SessionState `json:"sessionState"`
+	SessionEpoch int64        `json:"sessionEpoch"`
 }
 
 // QueryHistoryItem represents one entry in local query history.
