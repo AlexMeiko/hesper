@@ -1,0 +1,201 @@
+name: Build Desktop Clients
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    name: Linux x86_64 (AppImage)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux GTK4 / WebKitGTK 6.0 & appimagetool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev \
+            desktop-file-utils file
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/appimagetool" \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$HOME/.local/bin/appimagetool"
+
+      - name: Build & test frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm test
+
+      - name: Run Go unit & SQLite tests
+        run: go test -race -count=1 ./internal/...
+
+      - name: Determine version
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.1.0-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Linux binary & package AppImage
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          mkdir -p bin
+          go build -tags production -trimpath -ldflags="-s -w" -o bin/sql-manager .
+          bash scripts/package-appimage.sh
+
+      - name: Upload Linux AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-manager-linux-x86_64
+          path: |
+            dist/SQL-Manager-*-x86_64.AppImage
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86_64 (Zip)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build & test frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm test
+
+      - name: Run Go unit & SQLite tests (pure Go)
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./internal/...
+
+      - name: Determine version
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $ver = "0.1.0-" + $env:GITHUB_SHA.Substring(0, 7)
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$ver"
+
+      - name: Build Windows x86_64 binary & package Zip
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\stage" | Out-Null
+          go build -tags production -trimpath -ldflags="-s -w -H=windowsgui" -o "dist\stage\sql-manager.exe" .
+          # 如需默认绿色便携模式（数据写入同目录 data/ 而非 %APPDATA%），取消下一行注释：
+          # New-Item -ItemType File -Force -Path "dist\stage\portable.flag" | Out-Null
+          $zipName = "SQL-Manager-$env:VERSION-windows-x86_64.zip"
+          $zipPath = "dist\$zipName"
+          Compress-Archive -Path "dist\stage\*" -DestinationPath $zipPath -Force
+          $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zipName" | Out-File -FilePath "dist\SHA256SUMS-windows.txt" -Encoding ascii
+
+      - name: Upload Windows Zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-manager-windows-x86_64
+          path: |
+            dist/SQL-Manager-*-windows-x86_64.zip
+            dist/SHA256SUMS-windows.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate unified SHA256SUMS
+        working-directory: release-assets
+        run: |
+          rm -f SHA256SUMS SHA256SUMS-windows.txt
+          sha256sum *.AppImage *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/*.AppImage
+            release-assets/*.zip
+            release-assets/SHA256SUMS
