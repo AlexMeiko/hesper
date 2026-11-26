@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"time"
 
-	appsql "sql-manager/sql"
 	"sql-manager/internal/entity"
+	appsql "sql-manager/sql"
 
 	_ "modernc.org/sqlite"
 )
@@ -21,7 +24,7 @@ type LocalDB struct {
 
 // OpenLocalDB opens (or creates) app.db with WAL mode, foreign keys, and embedded schema.
 func OpenLocalDB(dbPath string) (*LocalDB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_pragma=journal_mode(WAL)", dbPath)
+	dsn := buildLocalDBDSN(dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open local app.db: %w", err)
@@ -32,6 +35,39 @@ func OpenLocalDB(dbPath string) (*LocalDB, error) {
 		return nil, fmt.Errorf("migrate local app.db: %w", err)
 	}
 	return &LocalDB{db: db}, nil
+}
+
+func buildLocalDBDSN(dbPath string) string {
+	trimmed := strings.TrimSpace(dbPath)
+	if trimmed == ":memory:" || strings.HasPrefix(trimmed, "file::memory:") {
+		return "file::memory:?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	}
+	absPath, err := filepath.Abs(trimmed)
+	if err != nil {
+		absPath = trimmed
+	}
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(ON)")
+	q.Add("_pragma", "journal_mode(WAL)")
+	return buildLocalFileURI(filepath.ToSlash(absPath), q)
+}
+
+func buildLocalFileURI(slashPath string, q url.Values) string {
+	if strings.HasPrefix(slashPath, "//?/") && len(slashPath) >= 6 && slashPath[5] == ':' {
+		c := slashPath[4]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			slashPath = "/" + slashPath[4:]
+		}
+	} else if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	u := url.URL{
+		Scheme:   "file",
+		Path:     slashPath,
+		RawQuery: q.Encode(),
+	}
+	return u.String()
 }
 
 func (l *LocalDB) Close() error {

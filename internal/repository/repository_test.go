@@ -2,7 +2,10 @@ package repository
 
 import (
 	"context"
+	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +90,41 @@ func TestLocalDB_CRUDHistoryKVAndEmbeddedSQLiteVersion(t *testing.T) {
 	after, err := db.GetConnection(ctx, "conn-1")
 	if err != nil || after != nil {
 		t.Fatalf("expected deleted connection to be nil, got=%v err=%v", after, err)
+	}
+}
+
+func TestBuildLocalFileURI_CrossPlatform(t *testing.T) {
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+
+	gotWin := buildLocalFileURI("C:/Users/Alex #1/AppData/Roaming/sql-manager/app.db", q)
+	if !strings.HasPrefix(gotWin, "file:///C:/Users/Alex%20%231/AppData/Roaming/sql-manager/app.db?") {
+		t.Fatalf("unexpected Windows local DB URI: %q", gotWin)
+	}
+	parsed, err := url.Parse(gotWin)
+	if err != nil || parsed.Host != "" {
+		t.Fatalf("expected empty authority for Windows local DB URI, got parsed=%+v err=%v", parsed, err)
+	}
+
+	gotUnix := buildLocalFileURI("/home/demo/.config/sql-manager/app.db", q)
+	if !strings.HasPrefix(gotUnix, "file:///home/demo/.config/sql-manager/app.db?") {
+		t.Fatalf("unexpected Unix local DB URI: %q", gotUnix)
+	}
+}
+
+func TestOpenLocalDB_SpecialCharactersPath(t *testing.T) {
+	subDir := filepath.Join(t.TempDir(), "cfg #1 100% 目录")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	db, err := OpenLocalDB(filepath.Join(subDir, "app #1.db"))
+	if err != nil {
+		t.Fatalf("OpenLocalDB in special-char path failed: %v", err)
+	}
+	defer db.Close()
+
+	ver, err := db.EmbeddedSQLiteVersion(context.Background())
+	if err != nil || ver == "" {
+		t.Fatalf("EmbeddedSQLiteVersion failed: ver=%q err=%v", ver, err)
 	}
 }

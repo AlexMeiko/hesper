@@ -107,8 +107,6 @@ func buildDSN(filePath string, isMemory, readOnly bool) string {
 	if err != nil {
 		absPath = filePath
 	}
-	// Encode special URI characters (? # %) while preserving path separators.
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(absPath)}
 	q := url.Values{}
 	if readOnly {
 		q.Set("mode", "ro")
@@ -118,8 +116,33 @@ func buildDSN(filePath string, isMemory, readOnly bool) string {
 		q.Add("_pragma", "busy_timeout(5000)")
 		q.Add("_pragma", "foreign_keys(ON)")
 	}
-	u.RawQuery = q.Encode()
+	return buildFileURI(filepath.ToSlash(absPath), q)
+}
+
+// buildFileURI constructs a cross-platform SQLite file:/// URI with an empty authority.
+// On Windows, filepath.ToSlash(absPath) returns "C:/..." without a leading "/"; passing that
+// directly to url.URL{Scheme: "file", Path: "C:/..."} yields "file://C:/...", which SQLite rejects
+// with "invalid uri authority: C:". Prepending "/" yields "file:///C:/...", matching SQLite's URI spec.
+func buildFileURI(slashPath string, q url.Values) string {
+	if strings.HasPrefix(slashPath, "//?/") && isWindowsDrivePath(slashPath[4:]) {
+		slashPath = "/" + slashPath[4:]
+	} else if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	u := url.URL{
+		Scheme:   "file",
+		Path:     slashPath,
+		RawQuery: q.Encode(),
+	}
 	return u.String()
+}
+
+func isWindowsDrivePath(p string) bool {
+	if len(p) < 2 || p[1] != ':' {
+		return false
+	}
+	c := p[0]
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // Conn represents one dedicated SQLite connection.
