@@ -49,11 +49,11 @@
 | 类别 | 选型 | 协议 | 说明 |
 | :--- | :--- | :--- | :--- |
 | **框架与构建** | **Vue 3.5+ / TypeScript 5.x / Vite 6+** | MIT | `<script setup>` + Pinia，复杂表单与桌面工作台开发高效 |
-| **状态管理** | **Pinia** | MIT | 仅管理客户端 UI 状态与后端确认状态的镜像 |
-| **样式与基础组件** | **Tailwind CSS 4 + shadcn-vue (Reka UI)** | MIT | 紧凑高密度桌面风，源码可控无商业协议风险 |
-| **图标与布局** | `lucide-vue-next` + `dockview-vue` | ISC / Apache-2.0 | 多 Tab、自由分屏与布局持久化 |
+| **状态管理** | **Pinia** | MIT | 仅管理客户端 UI 状态、弹窗/通知、元数据缓存与后端确认状态的镜像 |
+| **样式与基础组件** | **Tailwind CSS 4 (`@theme` 语义 Token)** + 自建轻量基础组件 | MIT | `BaseModal` / `ConfirmDialog` / `PaginationBar` / `CellText` / `ToastHost`，紧凑高密度桌面风且零冗余依赖 |
+| **图标与工作台布局** | `lucide-vue-next` + 自建轻量标签栏与分屏 | ISC / MIT | 多 Tab 切页保留编辑器与网格状态（`v-show`），配合 `useDragResize` 调节侧栏与上下分屏 |
 | **SQL 编辑器** | **CodeMirror 6** (`@codemirror/lang-sql`) | MIT | 轻量、多 Tab 内存低、原生四库方言与中文 IME 友好 |
-| **数据网格** | `@tanstack/vue-table` + `@tanstack/vue-virtual` | MIT | 无头表格 + DOM 虚拟滚动，便于定制行内编辑与框选复制 |
+| **数据网格与虚拟树** | `@tanstack/vue-virtual`（行/列双虚拟化网格 + 展平虚拟对象树） | MIT | 手写轻量网格与展平对象树，大宽表与数千张表均按视口渲染 |
 | **ER 图（二期）** | `@vue-flow/core` | MIT | 原生 Vue 3 关系图画布 |
 
 ---

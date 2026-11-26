@@ -1,8 +1,6 @@
-import * as ConnBinding from '@bindings/sql-manager/internal/binding/connectionbinding'
-import * as SchemaBinding from '@bindings/sql-manager/internal/binding/schemabinding'
-import * as QueryBinding from '@bindings/sql-manager/internal/binding/querybinding'
 import {
   ErrorCode,
+  streamUrl,
   type AppError,
   type BrowseTableRequest,
   type BrowseTableResponse,
@@ -22,55 +20,36 @@ import {
   type TableSummary,
   type TabSessionInfo,
   type TestConnectionResult,
-} from '@bindings/sql-manager/internal/dto/models'
+} from './types'
 
-export * from '@bindings/sql-manager/internal/dto/models'
+export * from './types'
 
-/**
- * Extracts a structured AppError from any Wails v3 rejection payload.
- * Wails MarshalError serializes *dto.AppError to JSON; fallback wraps raw text cleanly.
- */
-export function parseAppError(err: unknown): AppError {
-  if (err && typeof err === 'object') {
-    const maybe = err as Partial<AppError>
-    if (typeof maybe.code === 'string' && typeof maybe.message === 'string') {
-      return {
-        code: maybe.code as ErrorCode,
-        message: maybe.message,
-        detail: maybe.detail,
-        sqlState: maybe.sqlState,
-        line: maybe.line,
-        column: maybe.column,
-        position: maybe.position,
-        retrySafe: Boolean(maybe.retrySafe),
-        sessionState: maybe.sessionState,
-      }
-    }
-    if ('message' in err && typeof (err as { message: unknown }).message === 'string') {
-      const msg = (err as { message: string }).message
-      const parsed = tryParseAppErrorJSON(msg)
-      if (parsed) return parsed
-      return {
-        code: ErrorCode.ErrInternal,
-        message: msg,
-        retrySafe: false,
-      }
-    }
-  }
-  if (typeof err === 'string') {
-    const parsed = tryParseAppErrorJSON(err)
-    if (parsed) return parsed
-    return {
-      code: ErrorCode.ErrInternal,
-      message: err,
-      retrySafe: false,
-    }
+// Lazy-load Wails binding modules on first actual RPC invocation so importing stores/api in
+// unit tests (where individual api methods are mocked) never initializes @wailsio/runtime.
+const connBinding = () => import('@bindings/sql-manager/internal/binding/connectionbinding')
+const schemaBinding = () => import('@bindings/sql-manager/internal/binding/schemabinding')
+const queryBinding = () => import('@bindings/sql-manager/internal/binding/querybinding')
+
+export function isAppError(err: unknown): err is AppError {
+  if (!err || typeof err !== 'object') return false
+  const e = err as Partial<AppError>
+  return typeof e.code === 'string' && typeof e.message === 'string' && typeof e.retrySafe === 'boolean'
+}
+
+function normalizeAppError(obj: Partial<AppError> | null | undefined): AppError | null {
+  if (!obj || typeof obj.code !== 'string' || typeof obj.message !== 'string') {
+    return null
   }
   return {
-    code: ErrorCode.ErrInternal,
-    message: '发生未知错误',
-    detail: String(err),
-    retrySafe: false,
+    code: obj.code as ErrorCode,
+    message: obj.message,
+    detail: obj.detail,
+    sqlState: obj.sqlState,
+    line: obj.line,
+    column: obj.column,
+    position: obj.position,
+    retrySafe: Boolean(obj.retrySafe),
+    sessionState: obj.sessionState,
   }
 }
 
@@ -79,24 +58,50 @@ function tryParseAppErrorJSON(raw: string): AppError | null {
   const idx = trimmed.indexOf('{')
   if (idx < 0) return null
   try {
-    const obj = JSON.parse(trimmed.slice(idx)) as Partial<AppError>
-    if (obj && typeof obj.code === 'string' && typeof obj.message === 'string') {
-      return {
-        code: obj.code as ErrorCode,
-        message: obj.message,
-        detail: obj.detail,
-        sqlState: obj.sqlState,
-        line: obj.line,
-        column: obj.column,
-        position: obj.position,
-        retrySafe: Boolean(obj.retrySafe),
-        sessionState: obj.sessionState,
-      }
-    }
+    return normalizeAppError(JSON.parse(trimmed.slice(idx)) as Partial<AppError>)
   } catch {
-    // ignore non-JSON errors
+    return null
   }
-  return null
+}
+
+/**
+ * Extracts a structured AppError from any Wails v3 rejection payload.
+ * Returns already-normalized AppError instances as-is without redundant copying.
+ */
+export function parseAppError(err: unknown): AppError {
+  if (isAppError(err)) {
+    return err
+  }
+  if (err && typeof err === 'object') {
+    const normalized = normalizeAppError(err as Partial<AppError>)
+    if (normalized) return normalized
+
+    if ('message' in err && typeof (err as { message: unknown }).message === 'string') {
+      const msg = (err as { message: string }).message
+      return (
+        tryParseAppErrorJSON(msg) ?? {
+          code: ErrorCode.ErrInternal,
+          message: msg,
+          retrySafe: false,
+        }
+      )
+    }
+  }
+  if (typeof err === 'string') {
+    return (
+      tryParseAppErrorJSON(err) ?? {
+        code: ErrorCode.ErrInternal,
+        message: err,
+        retrySafe: false,
+      }
+    )
+  }
+  return {
+    code: ErrorCode.ErrInternal,
+    message: '发生未知错误',
+    detail: String(err),
+    retrySafe: false,
+  }
 }
 
 async function call<T>(fn: () => Promise<T>): Promise<T> {
@@ -110,101 +115,88 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
 export const api = {
   // --- Connections ---
   async listConnections(): Promise<ConnectionDTO[]> {
-    const res = await call(() => ConnBinding.ListConnections())
-    return res ?? []
+    return (await call(async () => (await connBinding()).ListConnections())) ?? []
   },
   saveConnection(req: SaveConnectionRequest): Promise<ConnectionDTO> {
-    return call(() => ConnBinding.SaveConnection(req))
+    return call(async () => (await connBinding()).SaveConnection(req))
   },
   deleteConnection(id: string): Promise<void> {
-    return call(() => ConnBinding.DeleteConnection(id))
+    return call(async () => (await connBinding()).DeleteConnection(id))
   },
   testConnection(req: SaveConnectionRequest): Promise<TestConnectionResult> {
-    return call(() => ConnBinding.TestConnection(req))
+    return call(async () => (await connBinding()).TestConnection(req))
   },
   connect(connID: string): Promise<ConnectResult> {
-    return call(() => ConnBinding.Connect(connID))
+    return call(async () => (await connBinding()).Connect(connID))
   },
   disconnect(connID: string): Promise<void> {
-    return call(() => ConnBinding.Disconnect(connID))
+    return call(async () => (await connBinding()).Disconnect(connID))
   },
   pickSQLiteFile(): Promise<string> {
-    return call(() => ConnBinding.PickSQLiteFile())
+    return call(async () => (await connBinding()).PickSQLiteFile())
   },
 
   // --- Schema / Explorer (Track A) ---
   async listDatabases(connID: string): Promise<DatabaseInfo[]> {
-    const res = await call(() => SchemaBinding.ListDatabases(connID))
-    return res ?? []
+    return (await call(async () => (await schemaBinding()).ListDatabases(connID))) ?? []
   },
   async listSchemas(connID: string, db: string): Promise<string[]> {
-    const res = await call(() => SchemaBinding.ListSchemas(connID, db))
-    return res ?? []
+    return (await call(async () => (await schemaBinding()).ListSchemas(connID, db))) ?? []
   },
   async listTables(connID: string, db: string, schema: string): Promise<TableSummary[]> {
-    const res = await call(() => SchemaBinding.ListTables(connID, db, schema))
-    return res ?? []
+    return (await call(async () => (await schemaBinding()).ListTables(connID, db, schema))) ?? []
   },
   async listViews(connID: string, db: string, schema: string): Promise<ObjectSummary[]> {
-    const res = await call(() => SchemaBinding.ListViews(connID, db, schema))
-    return res ?? []
+    return (await call(async () => (await schemaBinding()).ListViews(connID, db, schema))) ?? []
   },
   async listSequences(connID: string, db: string, schema: string): Promise<ObjectSummary[]> {
-    const res = await call(() => SchemaBinding.ListSequences(connID, db, schema))
-    return res ?? []
+    return (await call(async () => (await schemaBinding()).ListSequences(connID, db, schema))) ?? []
   },
   getTableDetail(connID: string, db: string, schema: string, table: string): Promise<TableDetail | null> {
-    return call(() => SchemaBinding.GetTableDetail(connID, db, schema, table))
+    return call(async () => (await schemaBinding()).GetTableDetail(connID, db, schema, table))
   },
   getTableDDL(connID: string, db: string, schema: string, table: string): Promise<string> {
-    return call(() => SchemaBinding.GetTableDDL(connID, db, schema, table))
+    return call(async () => (await schemaBinding()).GetTableDDL(connID, db, schema, table))
   },
   fetchCompletionCatalog(connID: string, db: string, schema: string): Promise<CompletionCatalog | null> {
-    return call(() => SchemaBinding.FetchCompletionCatalog(connID, db, schema))
+    return call(async () => (await schemaBinding()).FetchCompletionCatalog(connID, db, schema))
   },
 
-  // --- Query & Session (Track A Browse + Track B Dedicated SQL) ---
+  // --- Query & Live Browse (Track A Browse + Track B Dedicated Query Session) ---
   openTabSession(tabID: string, connID: string, db: string, schema: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.OpenTabSession(tabID, connID, db, schema))
+    return call(async () => (await queryBinding()).OpenTabSession(tabID, connID, db, schema))
   },
   switchTabDatabase(tabID: string, targetDB: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.SwitchTabDatabase(tabID, targetDB))
+    return call(async () => (await queryBinding()).SwitchTabDatabase(tabID, targetDB))
   },
   switchTabSchema(tabID: string, targetSchema: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.SwitchTabSchema(tabID, targetSchema))
+    return call(async () => (await queryBinding()).SwitchTabSchema(tabID, targetSchema))
   },
   reconnectTabSession(tabID: string, db: string, schema: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.ReconnectTabSession(tabID, db, schema))
+    return call(async () => (await queryBinding()).ReconnectTabSession(tabID, db, schema))
   },
   closeTab(tabID: string): Promise<void> {
-    return call(() => QueryBinding.CloseTab(tabID))
-  },
-  getTabSessionInfo(tabID: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.GetTabSessionInfo(tabID))
+    return call(async () => (await queryBinding()).CloseTab(tabID))
   },
   browseTable(req: BrowseTableRequest): Promise<BrowseTableResponse | null> {
-    return call(() => QueryBinding.BrowseTable(req))
+    return call(async () => (await queryBinding()).BrowseTable(req))
   },
   executeSQL(req: ExecuteSQLRequest): Promise<ExecuteSQLResponse | null> {
-    return call(() => QueryBinding.ExecuteSQL(req))
+    return call(async () => (await queryBinding()).ExecuteSQL(req))
   },
   fetchResultPage(req: FetchResultPageRequest): Promise<FetchResultPageResponse | null> {
-    return call(() => QueryBinding.FetchResultPage(req))
+    return call(async () => (await queryBinding()).FetchResultPage(req))
   },
   cancelExecution(tabID: string, execID: string): Promise<CancelExecutionResponse> {
-    return call(() => QueryBinding.CancelExecution(tabID, execID))
+    return call(async () => (await queryBinding()).CancelExecution(tabID, execID))
   },
   forceAbortSession(tabID: string): Promise<TabSessionInfo> {
-    return call(() => QueryBinding.ForceAbortSession(tabID))
+    return call(async () => (await queryBinding()).ForceAbortSession(tabID))
   },
-  async listHistory(connID: string, limit = 100): Promise<QueryHistoryItem[]> {
-    const res = await call(() => QueryBinding.ListHistory(connID, limit))
-    return res ?? []
+  async listHistory(connID: string, limit = 80): Promise<QueryHistoryItem[]> {
+    return (await call(async () => (await queryBinding()).ListHistory(connID, limit))) ?? []
   },
 
-  // --- Binary / Large-Text Lazy Stream ---
-  streamUrl(ref: string, download = false): string {
-    const encoded = encodeURIComponent(ref)
-    return download ? `/stream/${encoded}?download=1` : `/stream/${encoded}`
-  },
+  // --- Binary / Oversized Stream URL ---
+  streamUrl,
 }

@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Database, FilePlus2, Plus, Search, Settings, Shield, X } from 'lucide-vue-next'
+import { Database, FilePlus2, Plus, Search, Settings, Shield } from 'lucide-vue-next'
 import { useConnectionsStore } from '@/stores/connections'
-import { useSettingsStore } from '@/stores/settings'
+import { useUiStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { envColorHex } from '@/utils/format'
 
 const connStore = useConnectionsStore()
 const wsStore = useWorkspaceStore()
-const settings = useSettingsStore()
+const uiStore = useUiStore()
 
 const activeContext = computed(() => {
   const tab = wsStore.activeTab
@@ -35,50 +35,25 @@ const activeContext = computed(() => {
     schema: tab.schema,
   }
 })
-
-function quickNewQuery() {
-  const tab = wsStore.activeTab
-  if (tab) {
-    void wsStore.openQueryTab(tab.connectionId, tab.database, tab.schema)
-    return
-  }
-  const firstActive = Object.keys(connStore.activeMap)[0]
-  if (firstActive) {
-    void wsStore.openQueryTab(firstActive)
-    return
-  }
-  const firstSaved = connStore.connections[0]
-  if (firstSaved) {
-    void wsStore.openQueryTab(firstSaved.id)
-    return
-  }
-  connStore.openNewConnectionModal()
-}
 </script>
 
 <template>
-  <header
-    class="h-11 px-3 border-b flex items-center justify-between gap-3 shrink-0 select-none"
-    style="background: var(--bg-surface); border-color: var(--border-subtle)"
-  >
+  <header class="h-11 px-3 border-b border-border bg-surface flex items-center justify-between gap-3 shrink-0 select-none">
     <!-- Left: Brand + Quick Actions -->
     <div class="flex items-center gap-2">
       <div class="flex items-center gap-2 pr-2">
-        <div
-          class="w-6 h-6 rounded-md flex items-center justify-center"
-          style="background: var(--accent); color: #ffffff"
-        >
+        <div class="w-6 h-6 rounded-md bg-accent text-white flex items-center justify-center">
           <Database class="w-3.5 h-3.5" />
         </div>
-        <span class="font-semibold text-sm tracking-tight" style="color: var(--text-primary)">SQL Manager</span>
+        <span class="font-semibold text-sm tracking-tight text-ink">SQL Manager</span>
       </div>
 
-      <button type="button" class="btn" @click="connStore.openNewConnectionModal()">
+      <button type="button" class="btn" @click="uiStore.openNewConnectionModal()">
         <Plus class="w-3.5 h-3.5" />
         新建连接
       </button>
 
-      <button type="button" class="btn" @click="quickNewQuery">
+      <button type="button" class="btn" title="新建查询标签 (Ctrl+N)" @click="wsStore.openQuickQuery()">
         <FilePlus2 class="w-3.5 h-3.5" />
         新建查询
       </button>
@@ -87,25 +62,19 @@ function quickNewQuery() {
     <!-- Center: Always-Visible Active Connection & DB Context -->
     <div
       v-if="activeContext"
-      class="hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-[13px] max-w-md truncate"
-      style="background: var(--bg-canvas); border-color: var(--border-subtle)"
+      class="hidden md:flex items-center gap-2 px-3 py-1 rounded-full border border-border bg-canvas text-[13px] max-w-md truncate"
     >
       <span class="w-2 h-2 rounded-full shrink-0" :style="{ background: envColorHex(activeContext.conn.envColor) }" />
-      <span class="font-medium truncate" style="color: var(--text-primary)">{{ activeContext.conn.name }}</span>
-      <span v-if="activeContext.db" class="font-mono-tabular truncate" style="color: var(--text-secondary)">
+      <span class="font-medium truncate text-ink">{{ activeContext.conn.name }}</span>
+      <span v-if="activeContext.db" class="font-mono-tabular truncate text-ink-secondary">
         / {{ activeContext.db }}<template v-if="activeContext.schema">.{{ activeContext.schema }}</template>
       </span>
-      <span
-        v-if="activeContext.version"
-        class="font-mono-tabular text-xs shrink-0"
-        style="color: var(--text-faint)"
-      >
+      <span v-if="activeContext.version" class="font-mono-tabular text-xs shrink-0 text-ink-faint">
         {{ activeContext.version.split(' ')[0] }}
       </span>
       <Shield
         v-if="activeContext.conn.readOnly"
-        class="w-3.5 h-3.5 shrink-0"
-        style="color: var(--warning)"
+        class="w-3.5 h-3.5 shrink-0 text-warning"
         title="客户端只读保护已开启"
       />
     </div>
@@ -114,17 +83,13 @@ function quickNewQuery() {
     <div class="flex items-center gap-1.5">
       <button
         type="button"
-        class="btn !text-xs !px-2.5"
-        style="color: var(--text-muted)"
+        class="btn btn-sm text-ink-muted"
         title="快速跳转表、连接或命令 (Ctrl+K)"
-        @click="wsStore.commandPaletteOpen = true"
+        @click="uiStore.openCommandPalette()"
       >
         <Search class="w-3.5 h-3.5" />
         <span>快速跳转</span>
-        <kbd
-          class="ml-1 px-1 py-0 rounded border font-mono-tabular text-[11px]"
-          style="border-color: var(--border-strong)"
-        >
+        <kbd class="ml-1 px-1 py-0 rounded border border-border-strong font-mono-tabular text-[11px]">
           Ctrl+K
         </kbd>
       </button>
@@ -132,45 +97,12 @@ function quickNewQuery() {
       <button
         type="button"
         data-testid="open-settings-btn"
-        class="btn btn-ghost !w-8 !h-8 !p-0"
-        title="偏好设置（外观主题与界面字号）"
-        @click="settings.openSettingsModal()"
+        class="btn btn-ghost btn-icon"
+        title="偏好设置（外观主题与界面字号，Ctrl+,）"
+        @click="uiStore.openSettingsModal()"
       >
         <Settings class="w-4 h-4" />
       </button>
-    </div>
-
-    <!-- Toast Notifications -->
-    <div class="fixed right-4 bottom-4 z-50 flex flex-col gap-2 w-80 pointer-events-none">
-      <div
-        v-for="t in connStore.toasts"
-        :key="t.id"
-        class="pointer-events-auto rounded-lg border px-3 py-2.5 shadow-lg flex items-start justify-between gap-2 text-xs"
-        :style="{
-          background: 'var(--bg-elevated)',
-          borderColor:
-            t.kind === 'error'
-              ? 'var(--danger)'
-              : t.kind === 'warning'
-                ? 'var(--warning)'
-                : t.kind === 'success'
-                  ? 'var(--success)'
-                  : 'var(--border-strong)',
-          color: 'var(--text-primary)',
-        }"
-      >
-        <div class="min-w-0 space-y-0.5">
-          <div class="font-medium">{{ t.message }}</div>
-          <div v-if="t.detail" class="text-[11px] break-all" style="color: var(--text-muted)">{{ t.detail }}</div>
-        </div>
-        <button
-          type="button"
-          class="btn btn-ghost !w-5 !h-5 !p-0 shrink-0"
-          @click="connStore.dismissToast(t.id)"
-        >
-          <X class="w-3.5 h-3.5" />
-        </button>
-      </div>
     </div>
   </header>
 </template>

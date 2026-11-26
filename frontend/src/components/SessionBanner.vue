@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { AlertOctagon, AlertTriangle, Ban, Info, RefreshCw, RotateCcw, ShieldAlert } from 'lucide-vue-next'
-import { ErrorCode, SessionState, type AppError } from '@/api/client'
+import { ErrorCode, SessionState, type AppError } from '@/api/types'
 
 const props = defineProps<{
   error?: AppError | null
@@ -43,8 +43,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-if="isCommitUnknown"
       data-testid="commit-unknown-banner"
-      class="flex items-start justify-between gap-3 rounded-lg border px-3 py-2.5 text-xs"
-      style="background: var(--danger-soft); border-color: var(--danger); color: var(--danger)"
+      class="flex items-start justify-between gap-3 rounded-lg border border-danger bg-danger-soft text-danger px-3 py-2.5 text-xs"
     >
       <div class="flex items-start gap-2.5 min-w-0">
         <AlertOctagon class="w-4 h-4 shrink-0 mt-0.5" />
@@ -65,8 +64,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
         <button
           type="button"
           data-testid="commit-unknown-reconnect-btn"
-          class="btn"
-          style="border-color: var(--danger); color: var(--danger)"
+          class="btn border-danger text-danger"
           @click="emit('reconnect')"
         >
           <RefreshCw class="w-3.5 h-3.5" />
@@ -79,8 +77,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-else-if="isSessionLost"
       data-testid="session-lost-banner"
-      class="flex items-start justify-between gap-3 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--warning-soft); border-color: var(--warning); color: var(--warning)"
+      class="flex items-start justify-between gap-3 rounded-lg border border-warning bg-warning-soft text-warning px-3 py-2 text-xs"
     >
       <div class="flex items-start gap-2.5 min-w-0">
         <AlertTriangle class="w-4 h-4 shrink-0 mt-0.5" />
@@ -104,8 +101,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-if="isFailedTx"
       data-testid="failed-tx-banner"
-      class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--warning-soft); border-color: var(--warning); color: var(--warning)"
+      class="flex items-center justify-between gap-3 rounded-lg border border-warning bg-warning-soft text-warning px-3 py-2 text-xs"
     >
       <div class="flex items-center gap-2 min-w-0">
         <AlertTriangle class="w-4 h-4 shrink-0" />
@@ -121,8 +117,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-if="isCanceled && !isSessionLost && !isCommitUnknown"
       data-testid="canceled-banner"
-      class="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--accent-soft); border-color: var(--accent); color: var(--accent-text)"
+      class="flex items-start gap-2.5 rounded-lg border border-accent bg-accent-soft text-accent-text px-3 py-2 text-xs"
     >
       <Ban class="w-4 h-4 shrink-0 mt-0.5" />
       <div class="min-w-0">
@@ -136,8 +131,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-else-if="isReadOnlyDenied && !isCommitUnknown && !isSessionLost"
       data-testid="readonly-banner"
-      class="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--warning-soft); border-color: var(--warning); color: var(--warning)"
+      class="flex items-start gap-2.5 rounded-lg border border-warning bg-warning-soft text-warning px-3 py-2 text-xs"
     >
       <ShieldAlert class="w-4 h-4 shrink-0 mt-0.5" />
       <div class="min-w-0 space-y-0.5">
@@ -151,8 +145,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-else-if="error && !isCommitUnknown && !isSessionLost"
       data-testid="error-banner"
-      class="flex items-start gap-2.5 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--danger-soft); border-color: var(--danger); color: var(--danger)"
+      class="flex items-start gap-2.5 rounded-lg border border-danger bg-danger-soft text-danger px-3 py-2 text-xs"
     >
       <AlertOctagon class="w-4 h-4 shrink-0 mt-0.5" />
       <div class="min-w-0 space-y-0.5">
@@ -173,8 +166,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <div
       v-if="snapshotExpired"
       data-testid="snapshot-expired-banner"
-      class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs"
-      style="background: var(--warning-soft); border-color: var(--warning); color: var(--warning)"
+      class="flex items-center justify-between gap-3 rounded-lg border border-warning bg-warning-soft text-warning px-3 py-2 text-xs"
     >
       <div class="flex items-center gap-2 min-w-0">
         <Info class="w-4 h-4 shrink-0" />
@@ -191,8 +183,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
     <!-- 8. Calm Notice (e.g. Cancel sent / Reconnected) -->
     <div
       v-else-if="noticeMessage && !error && !isCommitUnknown && !isSessionLost"
-      class="flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs"
-      style="background: var(--bg-subtle); border-color: var(--border-subtle); color: var(--text-secondary)"
+      class="flex items-center gap-2 rounded-lg border border-border bg-subtle text-ink-secondary px-3 py-1.5 text-xs"
     >
       <Info class="w-3.5 h-3.5 shrink-0" />
       <span>{{ noticeMessage }}</span>

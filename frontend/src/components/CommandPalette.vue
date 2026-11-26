@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { FilePlus2, Moon, Plug, Plus, Search, Settings, Sun, Table2 } from 'lucide-vue-next'
 import { useConnectionsStore } from '@/stores/connections'
+import { useSchemaStore } from '@/stores/schema'
 import { useSettingsStore } from '@/stores/settings'
+import { useUiStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { connectionEndpointSummary, engineLabel } from '@/utils/format'
+import BaseModal from './BaseModal.vue'
 
 const connStore = useConnectionsStore()
+const schemaStore = useSchemaStore()
 const wsStore = useWorkspaceStore()
 const settings = useSettingsStore()
+const uiStore = useUiStore()
 
 const query = ref('')
-const inputRef = ref<HTMLInputElement | null>(null)
 const selectedIdx = ref(0)
 
 interface PaletteEntry {
@@ -29,14 +33,14 @@ const entries = computed<PaletteEntry[]>(() => {
       kind: 'action',
       label: '新建数据库连接',
       sub: '配置 MySQL、PostgreSQL、MariaDB 或 SQLite 连接',
-      run: () => connStore.openNewConnectionModal(),
+      run: () => uiStore.openNewConnectionModal(),
     },
     {
       id: 'act-settings',
       kind: 'action',
       label: '打开偏好设置',
       sub: '调整亮暗色主题（跟随系统/亮色/暗色）与界面字号',
-      run: () => settings.openSettingsModal(),
+      run: () => uiStore.openSettingsModal(),
     },
     {
       id: 'act-theme',
@@ -57,7 +61,7 @@ const entries = computed<PaletteEntry[]>(() => {
     })
   }
 
-  for (const [key, objs] of Object.entries(connStore.objectsMap)) {
+  for (const [key, objs] of Object.entries(schemaStore.objectsMap)) {
     const [connId, db, schema] = key.split('::')
     const conn = connStore.getConnection(connId)
     const active = connStore.getActive(connId)
@@ -81,13 +85,11 @@ const entries = computed<PaletteEntry[]>(() => {
 })
 
 watch(
-  () => wsStore.commandPaletteOpen,
-  async (open) => {
+  () => uiStore.commandPaletteOpen,
+  (open) => {
     if (open) {
       query.value = ''
       selectedIdx.value = 0
-      await nextTick()
-      inputRef.value?.focus()
     }
   },
 )
@@ -97,15 +99,11 @@ watch(entries, () => {
 })
 
 function executeItem(item: PaletteEntry) {
-  wsStore.commandPaletteOpen = false
+  uiStore.closeCommandPalette()
   item.run()
 }
 
 function onKeydown(ev: KeyboardEvent) {
-  if (ev.key === 'Escape') {
-    wsStore.commandPaletteOpen = false
-    return
-  }
   if (ev.key === 'ArrowDown') {
     ev.preventDefault()
     if (entries.value.length > 0) {
@@ -125,37 +123,31 @@ function onKeydown(ev: KeyboardEvent) {
 </script>
 
 <template>
-  <div
-    v-if="wsStore.commandPaletteOpen"
-    class="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4"
-    style="background: rgba(15, 23, 42, 0.42); backdrop-filter: blur(2px)"
-    @click.self="wsStore.commandPaletteOpen = false"
+  <BaseModal
+    :open="uiStore.commandPaletteOpen"
+    :align-top="true"
+    :hide-header="true"
+    max-width-class="max-w-xl"
+    test-id="command-palette-modal"
+    @close="uiStore.closeCommandPalette()"
   >
-    <div
-      class="w-full max-w-xl rounded-xl border shadow-2xl overflow-hidden flex flex-col"
-      style="background: var(--bg-elevated); border-color: var(--border-strong)"
-      @keydown="onKeydown"
-    >
-      <div class="px-3.5 py-2.5 border-b flex items-center gap-2.5" style="border-color: var(--border-subtle)">
-        <Search class="w-4 h-4 shrink-0" style="color: var(--text-muted)" />
+    <div class="flex flex-col" @keydown="onKeydown">
+      <div class="px-3.5 py-2.5 border-b border-border flex items-center gap-2.5">
+        <Search class="w-4 h-4 shrink-0 text-ink-muted" />
         <input
-          ref="inputRef"
           v-model="query"
+          data-modal-initial-focus
           type="text"
-          class="flex-1 bg-transparent border-0 outline-none text-sm"
-          style="color: var(--text-primary)"
+          class="flex-1 bg-transparent border-0 outline-none text-sm text-ink"
           placeholder="搜索已加载的表、新建查询或命令..."
         />
-        <kbd
-          class="px-1.5 py-0.5 rounded border text-[10px] font-mono-tabular"
-          style="border-color: var(--border-strong); color: var(--text-faint)"
-        >
+        <kbd class="px-1.5 py-0.5 rounded border border-border-strong text-[10px] font-mono-tabular text-ink-faint">
           ESC
         </kbd>
       </div>
 
       <div class="max-h-80 overflow-y-auto p-1.5 space-y-0.5">
-        <div v-if="entries.length === 0" class="py-8 text-center text-xs" style="color: var(--text-muted)">
+        <div v-if="entries.length === 0" class="py-8 text-center text-xs text-ink-muted">
           未找到匹配的表或命令
         </div>
 
@@ -164,10 +156,7 @@ function onKeydown(ev: KeyboardEvent) {
           :key="item.id"
           type="button"
           class="w-full text-left px-3 py-2 rounded-lg border-0 cursor-pointer flex items-center gap-2.5 transition-colors"
-          :style="{
-            background: idx === selectedIdx ? 'var(--accent-soft)' : 'transparent',
-            color: idx === selectedIdx ? 'var(--accent-text)' : 'var(--text-primary)',
-          }"
+          :class="idx === selectedIdx ? 'bg-accent-soft text-accent-text' : 'bg-transparent text-ink hover:bg-subtle'"
           @mouseenter="selectedIdx = idx"
           @click="executeItem(item)"
         >
@@ -187,5 +176,5 @@ function onKeydown(ev: KeyboardEvent) {
         </button>
       </div>
     </div>
-  </div>
+  </BaseModal>
 </template>

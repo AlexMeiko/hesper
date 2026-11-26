@@ -17,7 +17,6 @@
     "@codemirror/state": "^6.5.2",
     "@codemirror/view": "^6.36.5",
     "@lezer/highlight": "^1.2.5",
-    "@tanstack/vue-table": "^8.21.2",
     "@tanstack/vue-virtual": "^3.13.6",
     "@wailsio/runtime": "^3.1.0",
     "lucide-vue-next": "^0.511.0",

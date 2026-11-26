@@ -32,9 +32,6 @@ importers:
       '@lezer/highlight':
         specifier: ^1.2.5
         version: 1.2.5
-      '@tanstack/vue-table':
-        specifier: ^8.21.2
-        version: 8.21.3(vue@3.5.46(typescript@5.9.3))
       '@tanstack/vue-virtual':
         specifier: ^3.13.6
         version: 3.13.54(vue@3.5.46(typescript@5.9.3))
@@ -545,18 +542,8 @@ packages:
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
 
-  '@tanstack/table-core@8.21.3':
-    resolution: {integrity: sha512-ldZXEhOBb8Is7xLs01fR3YEc3DERiz5silj8tnGkFZytt1abEvl/GhUmCE0PMLaMPTa3Jk4HbKmRlHmu+gCftg==}
-    engines: {node: '>=12'}
-
   '@tanstack/virtual-core@3.19.13':
     resolution: {integrity: sha512-CyCvMm7m5JuvPW6eMPZkZBZk6diySrlUQNNRpQPiEnh2vakyghx82Hw3wW2THFUsl6xJ6uM4lSUaiA2T0oYW8w==}
-
-  '@tanstack/vue-table@8.21.3':
-    resolution: {integrity: sha512-rusRyd77c5tDPloPskctMyPLFEQUeBzxdQ+2Eow4F7gDPlPOB1UnnhzfpdvqZ8ZyX2rRNGmqNnQWm87OI2OQPw==}
-    engines: {node: '>=12'}
-    peerDependencies:
-      vue: '>=3.2'
 
   '@tanstack/vue-virtual@3.13.54':
     resolution: {integrity: sha512-KIZR3xG56QORaFAUOg0oZzhOlxtaLwRw8W6WEeHUtzJ556tgcI2KuaSHy+GHe/tRi5/XOjn4c9BUYDI2zq2XxA==}
@@ -1511,14 +1498,7 @@ snapshots:
       tailwindcss: 4.3.5
       vite: 6.4.6(jiti@2.7.0)(lightningcss@1.33.0)
 
-  '@tanstack/table-core@8.21.3': {}
-
   '@tanstack/virtual-core@3.19.13': {}
-
-  '@tanstack/vue-table@8.21.3(vue@3.5.46(typescript@5.9.3))':
-    dependencies:
-      '@tanstack/table-core': 8.21.3
-      vue: 3.5.46(typescript@5.9.3)
 
   '@tanstack/vue-virtual@3.13.54(vue@3.5.46(typescript@5.9.3))':
     dependencies:

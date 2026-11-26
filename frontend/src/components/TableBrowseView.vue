@@ -1,109 +1,54 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import {
-  ChevronLeft,
-  ChevronRight,
-  Code2,
-  Database,
-  FileCode2,
-  Filter,
-  Info,
-  RefreshCw,
-  ShieldCheck,
-  Table2,
-} from 'lucide-vue-next'
-import { RowIdentityKind } from '@/api/client'
+import { Code2, Database, FileCode2, Filter, Info, RefreshCw, ShieldCheck, Table2 } from 'lucide-vue-next'
+import { EngineType, RowIdentityKind } from '@/api/types'
 import { useConnectionsStore } from '@/stores/connections'
+import { useUiStore } from '@/stores/ui'
 import { useWorkspaceStore, type BrowseTab } from '@/stores/workspace'
 import { formatDuration } from '@/utils/format'
-import DataGrid from './DataGrid.vue'
+import { buildQuickSelectSQL, formatEditabilitySummary, formatTablePath } from '@/utils/tableMeta'
+import DataGrid, { type GridCopyNotice } from './DataGrid.vue'
+import PaginationBar from './PaginationBar.vue'
 import SessionBanner from './SessionBanner.vue'
 
-const props = defineProps<{
-  tab: BrowseTab
-}>()
+const props = withDefaults(
+  defineProps<{
+    tab: BrowseTab
+    active?: boolean
+  }>(),
+  {
+    active: true,
+  },
+)
 
 const connStore = useConnectionsStore()
 const wsStore = useWorkspaceStore()
+const uiStore = useUiStore()
 
 const conn = computed(() => connStore.getConnection(props.tab.connectionId))
 const activeConn = computed(() => connStore.getActive(props.tab.connectionId))
+const dialect = computed<EngineType>(
+  () => activeConn.value?.detectedType ?? conn.value?.driver ?? EngineType.EngineMySQL,
+)
 const columns = computed(() => props.tab.response?.columns ?? [])
 const rows = computed(() => props.tab.response?.rows ?? [])
 const rowOffset = computed(() => (props.tab.page - 1) * props.tab.pageSize)
-const displayTablePath = computed(() => {
-  const parts: string[] = []
-  if (activeConn.value?.capabilities.hasDatabases !== false && props.tab.database) {
-    parts.push(props.tab.database)
-  }
-  if (props.tab.schema) parts.push(props.tab.schema)
-  parts.push(props.tab.table)
-  return parts.join('.')
-})
 
-const editabilitySummary = computed(() => {
-  const ed = props.tab.response?.editability
-  if (!ed) return ''
-  const parts: string[] = []
-  if (ed.storageEngine) parts.push(ed.storageEngine)
-  if (ed.rowIdentity === RowIdentityKind.RowIdentityPrimaryKey) {
-    parts.push(`主键(${(ed.keyColumns ?? []).join(', ')})`)
-  } else if (ed.rowIdentity === RowIdentityKind.RowIdentityUniqueNotNull) {
-    parts.push(`非空唯一键(${(ed.keyColumns ?? []).join(', ')})`)
-  } else {
-    parts.push('无稳定唯一键')
-  }
-  if (!ed.batchTransactional) {
-    parts.push('非事务引擎')
-  }
-  if (conn.value?.readOnly) {
-    parts.push('只读连接')
-  }
-  return parts.join(' · ')
-})
+const displayTablePath = computed(() =>
+  formatTablePath(
+    props.tab.database,
+    props.tab.schema,
+    props.tab.table,
+    activeConn.value?.capabilities.hasDatabases !== false,
+  ),
+)
 
-function applyFilter() {
-  props.tab.page = 1
-  void wsStore.refreshBrowseTab(props.tab.id)
-}
-
-function clearFilter() {
-  props.tab.filterWhere = ''
-  props.tab.page = 1
-  void wsStore.refreshBrowseTab(props.tab.id)
-}
-
-function onSort(colName: string) {
-  if (props.tab.sortColumn !== colName) {
-    props.tab.sortColumn = colName
-    props.tab.sortDir = 'asc'
-  } else if (props.tab.sortDir === 'asc') {
-    props.tab.sortDir = 'desc'
-  } else {
-    props.tab.sortColumn = ''
-    props.tab.sortDir = ''
-  }
-  props.tab.page = 1
-  void wsStore.refreshBrowseTab(props.tab.id)
-}
-
-function goPage(next: number) {
-  if (next < 1) return
-  props.tab.page = next
-  void wsStore.refreshBrowseTab(props.tab.id)
-}
-
-function onPageSizeChange(ev: Event) {
-  const val = Number((ev.target as HTMLSelectElement).value)
-  if (val > 0) {
-    props.tab.pageSize = val
-    props.tab.page = 1
-    void wsStore.refreshBrowseTab(props.tab.id)
-  }
-}
+const editabilitySummary = computed(() =>
+  formatEditabilitySummary(props.tab.response?.editability, Boolean(conn.value?.readOnly)),
+)
 
 function openDdl() {
-  wsStore.openTableDdl({
+  uiStore.openTableDdl({
     connectionId: props.tab.connectionId,
     database: props.tab.database,
     schema: props.tab.schema,
@@ -112,34 +57,33 @@ function openDdl() {
 }
 
 function openNewQueryFromTable() {
-  const fq = props.tab.schema ? `${props.tab.schema}.${props.tab.table}` : props.tab.table
   void wsStore.openQueryTab(
     props.tab.connectionId,
     props.tab.database,
     props.tab.schema,
-    `SELECT *\nFROM ${fq}\nLIMIT 100;\n`,
+    buildQuickSelectSQL(props.tab.schema, props.tab.table, dialect.value),
     `查询 ${props.tab.table}`,
   )
+}
+
+function onGridCopied(notice: GridCopyNotice) {
+  uiStore.notify(notice.kind, notice.message, notice.detail, notice.detail ? 5500 : 3800)
 }
 </script>
 
 <template>
   <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
     <!-- Top Live-Browse Toolbar -->
-    <div
-      class="px-3 py-2 border-b flex flex-wrap items-center gap-2 shrink-0"
-      style="background: var(--bg-surface); border-color: var(--border-subtle)"
-    >
+    <div class="px-3 py-2 border-b border-border bg-surface flex flex-wrap items-center gap-2 shrink-0">
       <div class="flex items-center gap-2 mr-1">
         <span
-          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
-          style="background: var(--success-soft); color: var(--success)"
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-success-soft text-success"
           title="双击表打开实时表浏览：按稳定键排序实时查库，与编辑器一次性快照严格分离"
         >
           <Table2 class="w-3.5 h-3.5" />
           实时浏览
         </span>
-        <span class="text-[13px] font-medium" style="color: var(--text-primary)">
+        <span class="text-[13px] font-medium text-ink">
           {{ displayTablePath }}
         </span>
       </div>
@@ -147,20 +91,20 @@ function openNewQueryFromTable() {
       <!-- Quick WHERE Filter -->
       <div class="flex items-center gap-1.5 flex-1 min-w-[220px] max-w-md">
         <div class="relative flex-1">
-          <Filter
-            class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
-            style="color: var(--text-faint)"
-          />
+          <Filter class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-ink-faint" />
           <input
-            v-model="tab.filterWhere"
+            :value="tab.filterWhere"
             type="text"
-            class="input-field input-field-sm w-full !pl-8 font-mono-tabular"
+            class="input-field input-field-sm w-full pl-8 font-mono-tabular"
             placeholder="WHERE 过滤条件，例如 id > 10（按 Enter 应用）"
-            @keydown.enter="applyFilter"
+            @input="wsStore.setBrowseFilter(tab.id, ($event.target as HTMLInputElement).value)"
+            @keydown.enter="wsStore.applyBrowseFilter(tab.id)"
           />
         </div>
-        <button type="button" class="btn" @click="applyFilter">筛选</button>
-        <button v-if="tab.filterWhere" type="button" class="btn btn-ghost" @click="clearFilter">清除</button>
+        <button type="button" class="btn" @click="wsStore.applyBrowseFilter(tab.id)">筛选</button>
+        <button v-if="tab.filterWhere" type="button" class="btn btn-ghost" @click="wsStore.clearBrowseFilter(tab.id)">
+          清除
+        </button>
       </div>
 
       <div class="flex items-center gap-1.5 ml-auto">
@@ -168,7 +112,7 @@ function openNewQueryFromTable() {
           type="button"
           class="btn"
           :disabled="tab.loading"
-          title="刷新当前页"
+          title="刷新当前页 (F5)"
           @click="wsStore.refreshBrowseTab(tab.id)"
         >
           <RefreshCw class="w-3.5 h-3.5" :class="tab.loading ? 'animate-spin' : ''" />
@@ -178,9 +122,9 @@ function openNewQueryFromTable() {
         <button
           type="button"
           class="btn"
-          :class="tab.showExecutedSql ? '!border-[var(--accent)] !text-[var(--accent-text)]' : ''"
+          :class="tab.showExecutedSql ? 'btn-active' : ''"
           title="展开/收起本次实时浏览执行的 SQL"
-          @click="tab.showExecutedSql = !tab.showExecutedSql"
+          @click="wsStore.toggleBrowseExecutedSql(tab.id)"
         >
           <Code2 class="w-3.5 h-3.5" />
           SQL
@@ -201,11 +145,10 @@ function openNewQueryFromTable() {
     <!-- Collapsible Executed SQL Preview -->
     <div
       v-if="tab.showExecutedSql && tab.response?.executedSql"
-      class="px-3 py-1.5 border-b flex items-center justify-between gap-2 text-xs font-mono-tabular shrink-0"
-      style="background: var(--bg-subtle); border-color: var(--border-subtle); color: var(--text-secondary)"
+      class="px-3 py-1.5 border-b border-border bg-subtle text-ink-secondary flex items-center justify-between gap-2 text-xs font-mono-tabular shrink-0"
     >
       <span class="truncate select-text" :title="tab.response.executedSql">{{ tab.response.executedSql }}</span>
-      <span v-if="tab.response.stableOrderUsed" class="shrink-0 text-xs" style="color: var(--text-muted)">
+      <span v-if="tab.response.stableOrderUsed" class="shrink-0 text-xs text-ink-muted">
         稳定排序: {{ (tab.response.orderColumns ?? []).join(', ') }}
       </span>
     </div>
@@ -216,61 +159,34 @@ function openNewQueryFromTable() {
     </div>
 
     <!-- Pagination & Editability Info Strip -->
-    <div
-      class="px-3 py-1.5 border-b flex flex-wrap items-center justify-between gap-2 text-xs shrink-0"
-      style="background: var(--bg-canvas); border-color: var(--border-subtle); color: var(--text-secondary)"
-    >
-      <div class="flex items-center gap-2">
-        <button
-          type="button"
-          class="btn"
-          :disabled="tab.page <= 1 || tab.loading"
-          @click="goPage(tab.page - 1)"
-        >
-          <ChevronLeft class="w-3.5 h-3.5" />
-          上一页
-        </button>
-        <span class="font-mono-tabular text-[13px] px-1">第 {{ tab.page }} 页</span>
-        <button
-          type="button"
-          class="btn"
-          :disabled="!tab.response?.hasMore || tab.loading"
-          @click="goPage(tab.page + 1)"
-        >
-          下一页
-          <ChevronRight class="w-3.5 h-3.5" />
-        </button>
-
-        <select
-          :value="tab.pageSize"
-          class="input-field select-sm ml-1 min-w-[114px]"
-          @change="onPageSizeChange"
-        >
-          <option :value="100">100 行/页</option>
-          <option :value="200">200 行/页</option>
-          <option :value="500">500 行/页</option>
-          <option :value="1000">1000 行/页</option>
-        </select>
-
-        <span v-if="tab.response" class="font-mono-tabular text-xs ml-2" style="color: var(--text-muted)">
-          本页 {{ rows.length }} 行
-          <template v-if="tab.response.totalKnown"> · 共 {{ tab.response.totalRows }} 行</template>
-          · {{ formatDuration(tab.response.durationMs) }}
-        </span>
-      </div>
+    <div class="px-3 py-1.5 border-b border-border bg-canvas text-ink-secondary flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+      <PaginationBar
+        :page="tab.page"
+        :page-size="tab.pageSize"
+        :has-more="Boolean(tab.response?.hasMore)"
+        :loading="tab.loading"
+        @update:page="(p) => wsStore.setBrowsePage(tab.id, p)"
+        @update:page-size="(s) => wsStore.setBrowsePageSize(tab.id, s)"
+      >
+        <template #summary>
+          <span v-if="tab.response" class="font-mono-tabular text-xs ml-1 text-ink-muted">
+            本页 {{ rows.length }} 行
+            <template v-if="tab.response.totalKnown"> · 共 {{ tab.response.totalRows }} 行</template>
+            · {{ formatDuration(tab.response.durationMs) }}
+          </span>
+        </template>
+      </PaginationBar>
 
       <div
         v-if="editabilitySummary"
-        class="flex items-center gap-1.5 text-xs"
-        style="color: var(--text-muted)"
+        class="flex items-center gap-1.5 text-xs text-ink-muted"
         :title="(tab.response?.editability.reasons ?? []).join('；')"
       >
         <ShieldCheck
           v-if="tab.response?.editability.rowIdentity !== RowIdentityKind.RowIdentityNone"
-          class="w-3.5 h-3.5"
-          style="color: var(--success)"
+          class="w-3.5 h-3.5 text-success"
         />
-        <Info v-else class="w-3.5 h-3.5" style="color: var(--warning)" />
+        <Info v-else class="w-3.5 h-3.5 text-warning" />
         <span>{{ editabilitySummary }}</span>
       </div>
     </div>
@@ -283,11 +199,13 @@ function openNewQueryFromTable() {
       :sortable="true"
       :sort-column="tab.sortColumn"
       :sort-dir="tab.sortDir"
-      :table-name="tab.table"
+      :table-target="{ schema: tab.schema, table: tab.table }"
+      :dialect="dialect"
       :loading="tab.loading"
-      @sort="onSort"
-      @inspect="(p) => wsStore.inspectCell(p.column, p.cell, p.rowIndex)"
-      @copied="(lbl) => connStore.notify('success', lbl)"
+      :active="active"
+      @sort="(col) => wsStore.toggleBrowseSort(tab.id, col)"
+      @inspect="(p) => uiStore.inspectCell(p.column, p.cell, p.rowIndex)"
+      @copied="onGridCopied"
     />
   </div>
 </template>

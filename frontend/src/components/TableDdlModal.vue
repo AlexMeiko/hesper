@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Copy, KeyRound, Loader2, X } from 'lucide-vue-next'
-import { api, parseAppError, RowIdentityKind, type TableDetail } from '@/api/client'
+import { Copy, KeyRound, Loader2 } from 'lucide-vue-next'
+import { api, parseAppError } from '@/api/client'
+import type { TableDetail } from '@/api/types'
 import { useConnectionsStore } from '@/stores/connections'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useUiStore } from '@/stores/ui'
+import { copyToClipboard } from '@/utils/clipboard'
+import { formatEditabilitySummary, formatTablePath } from '@/utils/tableMeta'
+import BaseModal from './BaseModal.vue'
 
-const wsStore = useWorkspaceStore()
 const connStore = useConnectionsStore()
+const uiStore = useUiStore()
 
 const activeSection = ref<'columns' | 'indexes' | 'ddl'>('columns')
 const loading = ref(false)
@@ -15,20 +19,21 @@ const ddl = ref('')
 const errorMsg = ref('')
 
 const displayTargetPath = computed(() => {
-  const t = wsStore.ddlTarget
+  const t = uiStore.ddlTarget
   if (!t) return ''
   const active = connStore.getActive(t.connectionId)
-  const parts: string[] = []
-  if (active?.capabilities.hasDatabases !== false && t.database) {
-    parts.push(t.database)
-  }
-  if (t.schema) parts.push(t.schema)
-  parts.push(t.table)
-  return parts.join('.')
+  return formatTablePath(t.database, t.schema, t.table, active?.capabilities.hasDatabases !== false)
+})
+
+const editabilitySummary = computed(() => {
+  const t = uiStore.ddlTarget
+  if (!detail.value || !t) return ''
+  const conn = connStore.getConnection(t.connectionId)
+  return formatEditabilitySummary(detail.value.editability, Boolean(conn?.readOnly))
 })
 
 watch(
-  () => wsStore.ddlTarget,
+  () => uiStore.ddlTarget,
   async (target) => {
     detail.value = null
     ddl.value = ''
@@ -56,185 +61,138 @@ watch(
 
 async function copyDdl() {
   if (!ddl.value) return
-  try {
-    await navigator.clipboard.writeText(ddl.value)
-    connStore.notify('success', '已复制建表 DDL')
-  } catch {
-    // ignore
+  if (await copyToClipboard(ddl.value)) {
+    uiStore.notify('success', '已复制建表 DDL')
   }
 }
 </script>
 
 <template>
-  <div
-    v-if="wsStore.ddlTarget"
-    class="fixed inset-0 z-50 flex items-center justify-center p-4"
-    style="background: rgba(15, 23, 42, 0.45); backdrop-filter: blur(2px)"
-    @click.self="wsStore.closeTableDdl()"
+  <BaseModal
+    :open="Boolean(uiStore.ddlTarget)"
+    :title="`表结构与 DDL · ${displayTargetPath}`"
+    :subtitle="editabilitySummary"
+    max-width-class="max-w-3xl"
+    max-height-class="max-h-[85vh]"
+    test-id="table-ddl-modal"
+    @close="uiStore.closeTableDdl()"
   >
-    <div
-      class="w-full max-w-3xl rounded-xl border shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
-      style="background: var(--bg-elevated); border-color: var(--border-strong)"
-    >
-      <div
-        class="px-5 py-3 border-b flex items-center justify-between"
-        style="border-color: var(--border-subtle)"
-      >
-        <div class="space-y-0.5 min-w-0">
-          <div class="font-semibold text-sm truncate" style="color: var(--text-primary)">
-            表结构与 DDL · {{ displayTargetPath }}
-          </div>
-          <div v-if="detail" class="text-[11px] flex items-center gap-2" style="color: var(--text-muted)">
-            <span v-if="detail.engine">存储引擎: {{ detail.engine }}</span>
-            <span>
-              行定位键:
-              {{
-                detail.editability.rowIdentity === RowIdentityKind.RowIdentityPrimaryKey
-                  ? `主键 (${(detail.editability.keyColumns ?? []).join(', ')})`
-                  : detail.editability.rowIdentity === RowIdentityKind.RowIdentityUniqueNotNull
-                    ? `非空唯一键 (${(detail.editability.keyColumns ?? []).join(', ')})`
-                    : '无稳定唯一键'
-              }}
-            </span>
-            <span>事务能力: {{ detail.editability.batchTransactional ? '支持事务回滚' : '非事务引擎' }}</span>
-          </div>
-        </div>
-        <button type="button" class="btn btn-ghost !w-7 !h-7 !p-0" @click="wsStore.closeTableDdl()">
-          <X class="w-4 h-4" />
-        </button>
-      </div>
-
-      <!-- Tabs -->
-      <div
-        class="px-5 py-2 border-b flex items-center justify-between gap-2 shrink-0"
-        style="background: var(--bg-surface); border-color: var(--border-subtle)"
-      >
+    <template #toolbar>
+      <div class="px-5 py-2 border-b border-border bg-surface flex items-center justify-between gap-2 shrink-0">
         <div class="flex items-center gap-1.5">
           <button
             type="button"
-            class="btn !h-7"
-            :class="activeSection === 'columns' ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]' : 'btn-ghost'"
+            class="btn btn-sm"
+            :class="activeSection === 'columns' ? 'btn-active' : 'btn-ghost'"
             @click="activeSection = 'columns'"
           >
             列定义 ({{ detail?.columns?.length ?? 0 }})
           </button>
           <button
             type="button"
-            class="btn !h-7"
-            :class="activeSection === 'indexes' ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]' : 'btn-ghost'"
+            class="btn btn-sm"
+            :class="activeSection === 'indexes' ? 'btn-active' : 'btn-ghost'"
             @click="activeSection = 'indexes'"
           >
             索引 ({{ detail?.indexes?.length ?? 0 }})
           </button>
           <button
             type="button"
-            class="btn !h-7"
-            :class="activeSection === 'ddl' ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]' : 'btn-ghost'"
+            class="btn btn-sm"
+            :class="activeSection === 'ddl' ? 'btn-active' : 'btn-ghost'"
             @click="activeSection = 'ddl'"
           >
             DDL 源码
           </button>
         </div>
 
-        <button v-if="activeSection === 'ddl' && ddl" type="button" class="btn !h-7" @click="copyDdl">
+        <button v-if="activeSection === 'ddl' && ddl" type="button" class="btn btn-sm" @click="copyDdl">
           <Copy class="w-3.5 h-3.5" />
           复制 DDL
         </button>
       </div>
+    </template>
 
-      <!-- Content -->
-      <div class="flex-1 min-h-0 overflow-auto p-4">
-        <div v-if="loading" class="py-16 flex items-center justify-center gap-2 text-xs" style="color: var(--text-muted)">
-          <Loader2 class="w-4 h-4 animate-spin" />
-          正在读取表元数据...
-        </div>
-
-        <div
-          v-else-if="errorMsg"
-          class="rounded-lg border p-3 text-xs"
-          style="background: var(--danger-soft); border-color: var(--danger); color: var(--danger)"
-        >
-          {{ errorMsg }}
-        </div>
-
-        <!-- Columns Table -->
-        <table
-          v-else-if="activeSection === 'columns' && detail"
-          class="w-full text-xs border-collapse"
-        >
-          <thead>
-            <tr class="border-b text-left" style="border-color: var(--border-subtle); color: var(--text-muted)">
-              <th class="py-1.5 px-2 font-medium">#</th>
-              <th class="py-1.5 px-2 font-medium">列名</th>
-              <th class="py-1.5 px-2 font-medium">类型</th>
-              <th class="py-1.5 px-2 font-medium">允许 NULL</th>
-              <th class="py-1.5 px-2 font-medium">默认值</th>
-              <th class="py-1.5 px-2 font-medium">备注</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="col in detail.columns ?? []"
-              :key="col.name"
-              class="border-b hover:bg-[var(--bg-subtle)]"
-              style="border-color: var(--border-subtle)"
-            >
-              <td class="py-1.5 px-2 font-mono-tabular" style="color: var(--text-faint)">{{ col.ordinalPos }}</td>
-              <td class="py-1.5 px-2 font-mono-tabular font-medium">
-                <span class="inline-flex items-center gap-1">
-                  <KeyRound v-if="col.isPrimaryKey" class="w-3 h-3" style="color: var(--warning)" />
-                  {{ col.name }}
-                </span>
-              </td>
-              <td class="py-1.5 px-2 font-mono-tabular" style="color: var(--accent-text)">{{ col.columnType || col.dataType }}</td>
-              <td class="py-1.5 px-2">{{ col.nullable ? 'YES' : 'NO' }}</td>
-              <td class="py-1.5 px-2 font-mono-tabular" style="color: var(--text-secondary)">
-                {{ col.hasDefault ? col.defaultValue : '-' }}
-              </td>
-              <td class="py-1.5 px-2" style="color: var(--text-muted)">{{ col.comment || '' }}</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <!-- Indexes Table -->
-        <table
-          v-else-if="activeSection === 'indexes' && detail"
-          class="w-full text-xs border-collapse"
-        >
-          <thead>
-            <tr class="border-b text-left" style="border-color: var(--border-subtle); color: var(--text-muted)">
-              <th class="py-1.5 px-2 font-medium">索引名</th>
-              <th class="py-1.5 px-2 font-medium">包含列</th>
-              <th class="py-1.5 px-2 font-medium">属性</th>
-              <th class="py-1.5 px-2 font-medium">类型</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="idx in detail.indexes ?? []"
-              :key="idx.name"
-              class="border-b hover:bg-[var(--bg-subtle)]"
-              style="border-color: var(--border-subtle)"
-            >
-              <td class="py-1.5 px-2 font-mono-tabular font-medium">{{ idx.name }}</td>
-              <td class="py-1.5 px-2 font-mono-tabular">{{ (idx.columns ?? []).join(', ') }}</td>
-              <td class="py-1.5 px-2">
-                <span v-if="idx.primary" class="px-1.5 py-0.5 rounded text-[10px]" style="background: var(--warning-soft); color: var(--warning)">PRIMARY</span>
-                <span v-else-if="idx.unique" class="px-1.5 py-0.5 rounded text-[10px]" style="background: var(--accent-soft); color: var(--accent-text)">UNIQUE</span>
-                <span v-else style="color: var(--text-muted)">INDEX</span>
-              </td>
-              <td class="py-1.5 px-2 font-mono-tabular" style="color: var(--text-muted)">{{ idx.indexType || '-' }}</td>
-            </tr>
-          </tbody>
-        </table>
-
-        <!-- DDL Code -->
-        <pre
-          v-else-if="activeSection === 'ddl'"
-          class="m-0 p-3 rounded-lg border font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed"
-          style="background: var(--bg-canvas); border-color: var(--border-subtle); color: var(--text-primary); font-size: var(--editor-font-size)"
-        >{{ ddl || '-- 无 DDL 信息' }}</pre>
+    <!-- Content -->
+    <div class="flex-1 min-h-0 overflow-auto p-4">
+      <div v-if="loading" class="py-16 flex items-center justify-center gap-2 text-xs text-ink-muted">
+        <Loader2 class="w-4 h-4 animate-spin" />
+        正在读取表元数据...
       </div>
+
+      <div v-else-if="errorMsg" class="rounded-lg border border-danger bg-danger-soft text-danger p-3 text-xs">
+        {{ errorMsg }}
+      </div>
+
+      <!-- Columns Table -->
+      <table v-else-if="activeSection === 'columns' && detail" class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="border-b border-border text-left text-ink-muted">
+            <th class="py-1.5 px-2 font-medium">#</th>
+            <th class="py-1.5 px-2 font-medium">列名</th>
+            <th class="py-1.5 px-2 font-medium">类型</th>
+            <th class="py-1.5 px-2 font-medium">允许 NULL</th>
+            <th class="py-1.5 px-2 font-medium">默认值</th>
+            <th class="py-1.5 px-2 font-medium">备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="col in detail.columns ?? []"
+            :key="col.name"
+            class="border-b border-border hover:bg-subtle"
+          >
+            <td class="py-1.5 px-2 font-mono-tabular text-ink-faint">{{ col.ordinalPos }}</td>
+            <td class="py-1.5 px-2 font-mono-tabular font-medium text-ink">
+              <span class="inline-flex items-center gap-1">
+                <KeyRound v-if="col.isPrimaryKey" class="w-3 h-3 text-warning" />
+                {{ col.name }}
+              </span>
+            </td>
+            <td class="py-1.5 px-2 font-mono-tabular text-accent-text">{{ col.columnType || col.dataType }}</td>
+            <td class="py-1.5 px-2">{{ col.nullable ? 'YES' : 'NO' }}</td>
+            <td class="py-1.5 px-2 font-mono-tabular text-ink-secondary">
+              {{ col.hasDefault ? col.defaultValue : '-' }}
+            </td>
+            <td class="py-1.5 px-2 text-ink-muted">{{ col.comment || '' }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Indexes Table -->
+      <table v-else-if="activeSection === 'indexes' && detail" class="w-full text-xs border-collapse">
+        <thead>
+          <tr class="border-b border-border text-left text-ink-muted">
+            <th class="py-1.5 px-2 font-medium">索引名</th>
+            <th class="py-1.5 px-2 font-medium">包含列</th>
+            <th class="py-1.5 px-2 font-medium">属性</th>
+            <th class="py-1.5 px-2 font-medium">类型</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="idx in detail.indexes ?? []"
+            :key="idx.name"
+            class="border-b border-border hover:bg-subtle"
+          >
+            <td class="py-1.5 px-2 font-mono-tabular font-medium text-ink">{{ idx.name }}</td>
+            <td class="py-1.5 px-2 font-mono-tabular">{{ (idx.columns ?? []).join(', ') }}</td>
+            <td class="py-1.5 px-2">
+              <span v-if="idx.primary" class="px-1.5 py-0.5 rounded text-[10px] bg-warning-soft text-warning">PRIMARY</span>
+              <span v-else-if="idx.unique" class="px-1.5 py-0.5 rounded text-[10px] bg-accent-soft text-accent-text">UNIQUE</span>
+              <span v-else class="text-ink-muted">INDEX</span>
+            </td>
+            <td class="py-1.5 px-2 font-mono-tabular text-ink-muted">{{ idx.indexType || '-' }}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- DDL Code -->
+      <pre
+        v-else-if="activeSection === 'ddl'"
+        class="m-0 p-3 rounded-lg border border-border bg-canvas text-ink font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed"
+        style="font-size: var(--editor-font-size)"
+      >{{ ddl || '-- 无 DDL 信息' }}</pre>
     </div>
-  </div>
+  </BaseModal>
 </template>

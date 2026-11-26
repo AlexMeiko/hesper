@@ -1,227 +1,184 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import {
-  api,
-  parseAppError,
-  type AppError,
-  type CompletionCatalog,
-  type ConnectionDTO,
-  type ConnectResult,
-  type DatabaseInfo,
-  type ObjectSummary,
-  type SaveConnectionRequest,
-  type TableSummary,
-} from '@/api/client'
-
-export interface ToastItem {
-  id: number
-  kind: 'info' | 'success' | 'warning' | 'error'
-  message: string
-  detail?: string
-}
-
-export interface SchemaObjects {
-  tables: TableSummary[]
-  views: ObjectSummary[]
-  sequences: ObjectSummary[]
-  loaded: boolean
-  loading: boolean
-}
+import { api, parseAppError } from '@/api/client'
+import type { ConnectionDTO, ConnectResult, SaveConnectionRequest } from '@/api/types'
+import { useSchemaStore } from './schema'
+import { useUiStore } from './ui'
 
 export const useConnectionsStore = defineStore('connections', () => {
   const connections = ref<ConnectionDTO[]>([])
   const activeMap = ref<Record<string, ConnectResult>>({})
   const connectingMap = ref<Record<string, boolean>>({})
 
-  // Explorer caches
-  const databasesMap = ref<Record<string, DatabaseInfo[]>>({})
-  const schemasMap = ref<Record<string, string[]>>({}) // key: `${connId}::${db}`
-  const objectsMap = ref<Record<string, SchemaObjects>>({}) // key: `${connId}::${db}::${schema}`
-  const catalogMap = ref<Record<string, CompletionCatalog>>({}) // key: `${connId}::${db}::${schema}`
+  // Coalesce concurrent connect(connId) calls so clicking Connect then New Query
+  // awaits the same in-flight connection instead of returning null.
+  const inflightConnects = new Map<string, Promise<ConnectResult | null>>()
+  // Monotonic per-connection epoch bumped on every lifecycle transition so stale async callbacks
+  // cannot resurrect closed state, overwrite a newer connection, or repopulate cleared caches.
+  const connEpochs = new Map<string, number>()
+  // Per-connection serialization chain so backend connect / disconnect / delete RPCs for the
+  // same connId never overlap or reorder (a late disconnect can never tear down a newer connect).
+  const lifecycleChains = new Map<string, Promise<void>>()
 
-  // Modal state
-  const modalOpen = ref(false)
-  const editingConnection = ref<ConnectionDTO | null>(null)
-
-  // Toasts
-  const toasts = ref<ToastItem[]>([])
-  let toastSeq = 1
-
-  function notify(kind: ToastItem['kind'], message: string, detail?: string, ttlMs = 3800) {
-    const id = toastSeq++
-    toasts.value.push({ id, kind, message, detail })
-    window.setTimeout(() => {
-      toasts.value = toasts.value.filter((t) => t.id !== id)
-    }, ttlMs)
+  function getConnectionEpoch(connId: string): number {
+    return connEpochs.get(connId) ?? 0
   }
 
-  function dismissToast(id: number) {
-    toasts.value = toasts.value.filter((t) => t.id !== id)
+  function bumpConnectionEpoch(connId: string): number {
+    const next = getConnectionEpoch(connId) + 1
+    connEpochs.set(connId, next)
+    return next
   }
 
-  function dbKey(connId: string, db: string) {
-    return `${connId}::${db}`
+  function isConnectionCurrent(connId: string, epoch: number): boolean {
+    return getConnectionEpoch(connId) === epoch && Boolean(activeMap.value[connId])
   }
 
-  function objKey(connId: string, db: string, schema: string) {
-    return `${connId}::${db}::${schema}`
+  function invalidateConnection(connId: string): number {
+    const nextEpoch = bumpConnectionEpoch(connId)
+    delete activeMap.value[connId]
+    connectingMap.value[connId] = false
+    inflightConnects.delete(connId)
+    useSchemaStore().clearConnectionCache(connId)
+    return nextEpoch
+  }
+
+  function enqueueLifecycle<T>(connId: string, task: () => Promise<T>): Promise<T> {
+    const prev = lifecycleChains.get(connId)
+    const run = () => {
+      try {
+        return Promise.resolve(task())
+      } catch (err) {
+        return Promise.reject(err)
+      }
+    }
+    const resultPromise = prev ? prev.then(run, run) : run()
+    const tail = resultPromise.then(
+      () => undefined,
+      () => undefined,
+    )
+    lifecycleChains.set(connId, tail)
+    void tail.finally(() => {
+      if (lifecycleChains.get(connId) === tail) {
+        lifecycleChains.delete(connId)
+      }
+    })
+    return resultPromise
   }
 
   async function loadConnections() {
+    const uiStore = useUiStore()
     try {
       connections.value = await api.listConnections()
     } catch (err) {
       const e = parseAppError(err)
-      notify('error', '加载连接列表失败', e.message)
+      uiStore.notify('error', '加载连接列表失败', e.message)
     }
   }
 
-  function openNewConnectionModal() {
-    editingConnection.value = null
-    modalOpen.value = true
-  }
-
-  function openEditConnectionModal(conn: ConnectionDTO) {
-    editingConnection.value = conn
-    modalOpen.value = true
-  }
-
-  function closeConnectionModal() {
-    modalOpen.value = false
-    editingConnection.value = null
-  }
-
   async function saveConnection(req: SaveConnectionRequest): Promise<ConnectionDTO> {
+    const uiStore = useUiStore()
     const saved = await api.saveConnection(req)
     await loadConnections()
-    notify('success', req.id ? '连接配置已更新' : '连接配置已保存', saved.name)
+    uiStore.notify('success', req.id ? '连接配置已更新' : '连接配置已保存', saved.name)
     return saved
   }
 
-  async function deleteConnection(id: string) {
+  async function deleteConnection(id: string, opts?: { beforeDelete?: () => Promise<void> }) {
+    const uiStore = useUiStore()
+    // Immediately invalidate epoch, active state, connecting spinner, and cache BEFORE closing tabs
+    // or calling backend RPC so in-flight connect/openQueryTab cannot resurrect tabs or stay spinning.
+    invalidateConnection(id)
     try {
-      await api.deleteConnection(id)
-      delete activeMap.value[id]
-      delete databasesMap.value[id]
+      await enqueueLifecycle(id, async () => {
+        if (opts?.beforeDelete) {
+          await opts.beforeDelete()
+        }
+        await api.deleteConnection(id)
+      })
       await loadConnections()
-      notify('info', '已删除连接配置')
+      uiStore.notify('info', '已删除连接配置')
     } catch (err) {
       const e = parseAppError(err)
-      notify('error', '删除连接失败', e.message)
+      uiStore.notify('error', '删除连接失败', e.message)
     }
   }
 
   async function connect(connId: string): Promise<ConnectResult | null> {
-    if (connectingMap.value[connId]) return activeMap.value[connId] ?? null
+    if (inflightConnects.has(connId)) {
+      return inflightConnects.get(connId)!
+    }
+
+    const uiStore = useUiStore()
+    const schemaStore = useSchemaStore()
+    const epoch = bumpConnectionEpoch(connId)
     connectingMap.value[connId] = true
-    try {
-      const res = await api.connect(connId)
-      activeMap.value[connId] = res
-      if (res.capabilities.hasDatabases) {
-        await loadDatabases(connId)
-      } else {
-        databasesMap.value[connId] = []
-        await loadObjects(connId, res.currentDb || 'main', '')
+
+    let promise!: Promise<ConnectResult | null>
+    promise = (async (): Promise<ConnectResult | null> => {
+      try {
+        const res = await enqueueLifecycle(connId, async () => {
+          if (getConnectionEpoch(connId) !== epoch) {
+            return null
+          }
+          return api.connect(connId)
+        })
+        // If disconnected/deleted while connect() was queued or in flight, abort quietly:
+        // the queued disconnect/delete in lifecycleChains handles backend teardown cleanly
+        // without issuing a second rogue disconnect against any newer reconnect.
+        if (!res || getConnectionEpoch(connId) !== epoch) {
+          return null
+        }
+        activeMap.value[connId] = res
+        if (res.capabilities.hasDatabases) {
+          await schemaStore.loadDatabases(connId, true)
+        } else {
+          schemaStore.setDatabases(connId, [])
+          await schemaStore.loadObjects(connId, res.currentDb, '')
+        }
+        if (!isConnectionCurrent(connId, epoch)) {
+          return null
+        }
+        return res
+      } catch (err) {
+        if (getConnectionEpoch(connId) !== epoch) {
+          return null
+        }
+        const e = parseAppError(err)
+        uiStore.notify('error', '连接数据库失败', e.detail ? `${e.message} (${e.detail})` : e.message, 5500)
+        return null
+      } finally {
+        if (inflightConnects.get(connId) === promise) {
+          connectingMap.value[connId] = false
+          inflightConnects.delete(connId)
+        }
       }
-      return res
-    } catch (err) {
-      const e = parseAppError(err)
-      notify('error', '连接数据库失败', e.detail ? `${e.message} (${e.detail})` : e.message, 5500)
-      return null
+    })()
+
+    inflightConnects.set(connId, promise)
+    return promise
+  }
+
+  async function disconnect(connId: string, opts?: { beforeClose?: () => Promise<void> }) {
+    const uiStore = useUiStore()
+    const schemaStore = useSchemaStore()
+    // Invalidate immediately BEFORE closing tabs or awaiting backend RPC so any concurrent
+    // openQueryTab() or connect() aborts cleanly instead of leaving orphan tabs or stale caches.
+    const discEpoch = invalidateConnection(connId)
+    try {
+      await enqueueLifecycle(connId, async () => {
+        if (opts?.beforeClose) {
+          await opts.beforeClose()
+        }
+        await api.disconnect(connId)
+      })
     } finally {
-      connectingMap.value[connId] = false
-    }
-  }
-
-  async function disconnect(connId: string) {
-    try {
-      await api.disconnect(connId)
-    } finally {
-      delete activeMap.value[connId]
-      delete databasesMap.value[connId]
-      for (const k of Object.keys(schemasMap.value)) {
-        if (k.startsWith(`${connId}::`)) delete schemasMap.value[k]
+      // Never wipe state/caches belonging to a newer reconnect that started after this disconnect!
+      if (getConnectionEpoch(connId) === discEpoch) {
+        delete activeMap.value[connId]
+        schemaStore.clearConnectionCache(connId)
+        uiStore.notify('info', '已断开连接并释放会话与缓存')
       }
-      for (const k of Object.keys(objectsMap.value)) {
-        if (k.startsWith(`${connId}::`)) delete objectsMap.value[k]
-      }
-      for (const k of Object.keys(catalogMap.value)) {
-        if (k.startsWith(`${connId}::`)) delete catalogMap.value[k]
-      }
-      notify('info', '已断开连接并释放会话与缓存')
-    }
-  }
-
-  async function loadDatabases(connId: string): Promise<DatabaseInfo[]> {
-    const list = await api.listDatabases(connId)
-    databasesMap.value[connId] = list
-    return list
-  }
-
-  async function loadSchemas(connId: string, db: string): Promise<string[]> {
-    const key = dbKey(connId, db)
-    const list = await api.listSchemas(connId, db)
-    schemasMap.value[key] = list
-    return list
-  }
-
-  async function loadObjects(connId: string, db: string, schema: string, force = false): Promise<SchemaObjects> {
-    const key = objKey(connId, db, schema)
-    const existing = objectsMap.value[key]
-    if (existing && existing.loaded && !force) {
-      return existing
-    }
-    const active = activeMap.value[connId]
-    const caps = active?.capabilities
-    objectsMap.value[key] = {
-      tables: existing?.tables ?? [],
-      views: existing?.views ?? [],
-      sequences: existing?.sequences ?? [],
-      loaded: existing?.loaded ?? false,
-      loading: true,
-    }
-    try {
-      const [tables, views, sequences] = await Promise.all([
-        api.listTables(connId, db, schema),
-        caps?.supportsViews ? api.listViews(connId, db, schema) : Promise.resolve([]),
-        caps?.supportsSequences ? api.listSequences(connId, db, schema) : Promise.resolve([]),
-      ])
-      const result: SchemaObjects = {
-        tables,
-        views,
-        sequences,
-        loaded: true,
-        loading: false,
-      }
-      objectsMap.value[key] = result
-      return result
-    } catch (err) {
-      objectsMap.value[key] = {
-        tables: [],
-        views: [],
-        sequences: [],
-        loaded: false,
-        loading: false,
-      }
-      const e = parseAppError(err) as AppError
-      notify('error', '加载对象列表失败', e.message)
-      throw e
-    }
-  }
-
-  async function loadCompletionCatalog(connId: string, db: string, schema: string): Promise<CompletionCatalog | null> {
-    const effectiveDb = db || (activeMap.value[connId]?.capabilities.hasDatabases === false ? 'main' : '')
-    if (!connId || !effectiveDb) return null
-    const key = objKey(connId, effectiveDb, schema)
-    if (catalogMap.value[key]) return catalogMap.value[key]
-    try {
-      const cat = await api.fetchCompletionCatalog(connId, effectiveDb, schema)
-      if (cat) {
-        catalogMap.value[key] = cat
-      }
-      return cat
-    } catch {
-      return null
     }
   }
 
@@ -237,29 +194,13 @@ export const useConnectionsStore = defineStore('connections', () => {
     connections,
     activeMap,
     connectingMap,
-    databasesMap,
-    schemasMap,
-    objectsMap,
-    catalogMap,
-    modalOpen,
-    editingConnection,
-    toasts,
-    notify,
-    dismissToast,
-    dbKey,
-    objKey,
+    getConnectionEpoch,
+    isConnectionCurrent,
     loadConnections,
-    openNewConnectionModal,
-    openEditConnectionModal,
-    closeConnectionModal,
     saveConnection,
     deleteConnection,
     connect,
     disconnect,
-    loadDatabases,
-    loadSchemas,
-    loadObjects,
-    loadCompletionCatalog,
     getConnection,
     getActive,
   }

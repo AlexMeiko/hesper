@@ -27,6 +27,7 @@ export type {
     ExecuteSQLResponse,
     FetchResultPageRequest,
     FetchResultPageResponse,
+    HighRiskStatement,
     IndexDetail,
     ObjectSummary,
     QueryHistoryItem,

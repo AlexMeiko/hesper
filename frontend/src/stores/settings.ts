@@ -5,6 +5,12 @@ export type ThemeMode = 'light' | 'dark'
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type FontScale = 'compact' | 'standard' | 'comfortable'
 
+export interface DensityMetrics {
+  gridRowHeight: number
+  treeConnHeight: number
+  treeItemHeight: number
+}
+
 const VALID_THEME_PREFS: ThemePreference[] = ['system', 'light', 'dark']
 const VALID_SCALES: FontScale[] = ['compact', 'standard', 'comfortable']
 
@@ -28,7 +34,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const sidebarWidth = ref<number>(Number(localStorage.getItem('sqlm:sidebarWidth')) || 288)
   const defaultPageSize = ref<number>(Number(localStorage.getItem('sqlm:pageSize')) || 200)
   const showWhitespace = ref<boolean>(localStorage.getItem('sqlm:showWhitespace') === 'true')
-  const settingsModalOpen = ref<boolean>(false)
 
   // Listen to OS color-scheme changes while in 'system' mode
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -51,6 +56,18 @@ export const useSettingsStore = defineStore('settings', () => {
     return themePreference.value
   })
 
+  // Centralized row/node heights per fontScale consumed by DataGrid and ExplorerSidebar
+  const densityMetrics = computed<DensityMetrics>(() => {
+    switch (fontScale.value) {
+      case 'compact':
+        return { gridRowHeight: 28, treeConnHeight: 42, treeItemHeight: 26 }
+      case 'comfortable':
+        return { gridRowHeight: 34, treeConnHeight: 50, treeItemHeight: 32 }
+      default:
+        return { gridRowHeight: 31, treeConnHeight: 46, treeItemHeight: 29 }
+    }
+  })
+
   function applyTheme(mode: ThemeMode) {
     document.documentElement.setAttribute('data-theme', mode)
   }
@@ -71,11 +88,6 @@ export const useSettingsStore = defineStore('settings', () => {
     fontScale.value = scale
   }
 
-  function cycleFontScale() {
-    const idx = VALID_SCALES.indexOf(fontScale.value)
-    fontScale.value = VALID_SCALES[(idx + 1) % VALID_SCALES.length]
-  }
-
   function toggleWhitespace() {
     showWhitespace.value = !showWhitespace.value
   }
@@ -84,14 +96,6 @@ export const useSettingsStore = defineStore('settings', () => {
     const clamped = Math.max(220, Math.min(480, Math.round(px)))
     sidebarWidth.value = clamped
     localStorage.setItem('sqlm:sidebarWidth', String(clamped))
-  }
-
-  function openSettingsModal() {
-    settingsModalOpen.value = true
-  }
-
-  function closeSettingsModal() {
-    settingsModalOpen.value = false
   }
 
   watch(
@@ -128,17 +132,14 @@ export const useSettingsStore = defineStore('settings', () => {
     themePreference,
     systemPrefersDark,
     fontScale,
+    densityMetrics,
     sidebarWidth,
     defaultPageSize,
     showWhitespace,
-    settingsModalOpen,
     setThemePreference,
     toggleTheme,
     setFontScale,
-    cycleFontScale,
     toggleWhitespace,
     setSidebarWidth,
-    openSettingsModal,
-    closeSettingsModal,
   }
 })
