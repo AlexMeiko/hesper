@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api, parseAppError } from '@/api/client'
 import type { ConnectionDTO, ConnectResult, SaveConnectionRequest } from '@/api/types'
+import { runWithSSHChallenges } from '@/utils/sshChallenge'
 import { useSchemaStore } from './schema'
 import { useUiStore } from './ui'
 
@@ -117,16 +118,40 @@ export const useConnectionsStore = defineStore('connections', () => {
     let promise!: Promise<ConnectResult | null>
     promise = (async (): Promise<ConnectResult | null> => {
       try {
-        const res = await enqueueLifecycle(connId, async () => {
-          if (getConnectionEpoch(connId) !== epoch) {
+        const outcome = await runWithSSHChallenges<ConnectResult>({
+          run: (secret) =>
+            enqueueLifecycle(connId, async () => {
+              if (getConnectionEpoch(connId) !== epoch) {
+                return null
+              }
+              return secret
+                ? api.connectWithSSHSecret(connId, secret.secret, secret.saveSecret)
+                : api.connect(connId)
+            }),
+          isStillCurrent: () => getConnectionEpoch(connId) === epoch,
+          onTrustHostKey: (hostPort, algorithm, fingerprint) =>
+            enqueueLifecycle(connId, async () => {
+              if (getConnectionEpoch(connId) !== epoch) return
+              await api.trustSSHHostKey(hostPort, algorithm, fingerprint)
+            }),
+          onCredentialSaved: () => {
+            void loadConnections()
+          },
+        })
+
+        if (!outcome.ok) {
+          if (outcome.aborted || outcome.canceled || getConnectionEpoch(connId) !== epoch) {
             return null
           }
-          return api.connect(connId)
-        })
-        // If disconnected/deleted while connect() was queued or in flight, abort quietly:
-        // the queued disconnect/delete in lifecycleChains handles backend teardown cleanly
-        // without issuing a second rogue disconnect against any newer reconnect.
-        if (!res || getConnectionEpoch(connId) !== epoch) {
+          if (outcome.error) {
+            const e = outcome.error
+            uiStore.notify('error', '连接数据库失败', e.detail ? `${e.message} (${e.detail})` : e.message, 5500)
+          }
+          return null
+        }
+
+        const res = outcome.value
+        if (getConnectionEpoch(connId) !== epoch) {
           return null
         }
         activeMap.value[connId] = res

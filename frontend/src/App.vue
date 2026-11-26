@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { Database, FilePlus2, Loader2, Plus, Table2, TerminalSquare, X } from 'lucide-vue-next'
+import { api } from '@/api/client'
 import { useDragResize } from '@/composables/useDragResize'
 import { useShortcuts } from '@/composables/useShortcuts'
 import { useConnectionsStore } from '@/stores/connections'
@@ -14,6 +15,7 @@ import ConnectionModal from './components/ConnectionModal.vue'
 import ExplorerSidebar from './components/ExplorerSidebar.vue'
 import QueryTabView from './components/QueryTabView.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import SSHSecretModal from './components/SSHSecretModal.vue'
 import TableBrowseView from './components/TableBrowseView.vue'
 import TableDdlModal from './components/TableDdlModal.vue'
 import ToastHost from './components/ToastHost.vue'
@@ -42,8 +44,18 @@ function tabEnvColor(connId: string): string {
   return envColorHex(c?.envColor)
 }
 
+let unsubSessionState: (() => void) | null = null
+
 onMounted(() => {
   void connStore.loadConnections()
+  unsubSessionState = api.onSessionStateChanged((evt) => {
+    wsStore.applySessionStateEvent(evt)
+  })
+})
+
+onUnmounted(() => {
+  unsubSessionState?.()
+  unsubSessionState = null
 })
 </script>
 
@@ -192,6 +204,7 @@ onMounted(() => {
     <CommandPalette />
     <ValueInspector />
     <ConfirmDialog />
+    <SSHSecretModal />
     <ToastHost />
   </div>
 </template>

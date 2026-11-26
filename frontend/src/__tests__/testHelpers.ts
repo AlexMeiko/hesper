@@ -13,6 +13,8 @@ export function makeQueryTab(overrides: Partial<QueryTab> = {}): QueryTab {
     sql,
     cleanSql: overrides.cleanSql ?? sql,
     sessionState: SessionState.SessionAliveIdle,
+    sessionEpoch: 0,
+    sessionEstablished: true,
     serverConnId: '100',
     readOnly: false,
     running: false,

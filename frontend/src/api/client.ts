@@ -16,6 +16,7 @@ import {
   type ObjectSummary,
   type QueryHistoryItem,
   type SaveConnectionRequest,
+  type SessionStateEvent,
   type TableDetail,
   type TableSummary,
   type TabSessionInfo,
@@ -50,6 +51,11 @@ function normalizeAppError(obj: Partial<AppError> | null | undefined): AppError 
     position: obj.position,
     retrySafe: Boolean(obj.retrySafe),
     sessionState: obj.sessionState,
+    sessionEpoch: typeof obj.sessionEpoch === 'number' ? obj.sessionEpoch : undefined,
+    hostKeyChallenge: obj.hostKeyChallenge ?? undefined,
+    sshAuthPrompt: obj.sshAuthPrompt ?? undefined,
+    credentialSaved: obj.credentialSaved ? true : undefined,
+    saveWarning: obj.saveWarning || undefined,
   }
 }
 
@@ -126,14 +132,23 @@ export const api = {
   testConnection(req: SaveConnectionRequest): Promise<TestConnectionResult> {
     return call(async () => (await connBinding()).TestConnection(req))
   },
+  trustSSHHostKey(hostPort: string, algorithm: string, fingerprint: string): Promise<void> {
+    return call(async () => (await connBinding()).TrustSSHHostKey(hostPort, algorithm, fingerprint))
+  },
   connect(connID: string): Promise<ConnectResult> {
     return call(async () => (await connBinding()).Connect(connID))
+  },
+  connectWithSSHSecret(connID: string, sshSecret: string, saveSecret: boolean): Promise<ConnectResult> {
+    return call(async () => (await connBinding()).ConnectWithSSHSecret(connID, sshSecret, saveSecret))
   },
   disconnect(connID: string): Promise<void> {
     return call(async () => (await connBinding()).Disconnect(connID))
   },
   pickSQLiteFile(): Promise<string> {
     return call(async () => (await connBinding()).PickSQLiteFile())
+  },
+  pickLocalFile(kind: string): Promise<string> {
+    return call(async () => (await connBinding()).PickLocalFile(kind))
   },
 
   // --- Schema / Explorer (Track A) ---
@@ -166,6 +181,18 @@ export const api = {
   openTabSession(tabID: string, connID: string, db: string, schema: string): Promise<TabSessionInfo> {
     return call(async () => (await queryBinding()).OpenTabSession(tabID, connID, db, schema))
   },
+  openTabSessionWithSSHSecret(
+    tabID: string,
+    connID: string,
+    db: string,
+    schema: string,
+    sshSecret: string,
+    saveSecret: boolean,
+  ): Promise<TabSessionInfo> {
+    return call(async () =>
+      (await queryBinding()).OpenTabSessionWithSSHSecret(tabID, connID, db, schema, sshSecret, saveSecret),
+    )
+  },
   switchTabDatabase(tabID: string, targetDB: string): Promise<TabSessionInfo> {
     return call(async () => (await queryBinding()).SwitchTabDatabase(tabID, targetDB))
   },
@@ -174,6 +201,17 @@ export const api = {
   },
   reconnectTabSession(tabID: string, db: string, schema: string): Promise<TabSessionInfo> {
     return call(async () => (await queryBinding()).ReconnectTabSession(tabID, db, schema))
+  },
+  reconnectTabSessionWithSSHSecret(
+    tabID: string,
+    db: string,
+    schema: string,
+    sshSecret: string,
+    saveSecret: boolean,
+  ): Promise<TabSessionInfo> {
+    return call(async () =>
+      (await queryBinding()).ReconnectTabSessionWithSSHSecret(tabID, db, schema, sshSecret, saveSecret),
+    )
   },
   closeTab(tabID: string): Promise<void> {
     return call(async () => (await queryBinding()).CloseTab(tabID))
@@ -195,6 +233,35 @@ export const api = {
   },
   async listHistory(connID: string, limit = 80): Promise<QueryHistoryItem[]> {
     return (await call(async () => (await queryBinding()).ListHistory(connID, limit))) ?? []
+  },
+
+  // --- Background Wails Events ---
+  onSessionStateChanged(handler: (evt: SessionStateEvent) => void): () => void {
+    // Avoid booting @wailsio/runtime background timers/fetches in headless unit tests.
+    if ((import.meta as { env?: { MODE?: string } }).env?.MODE === 'test') {
+      return () => {}
+    }
+    let canceled = false
+    let unsub: (() => void) | null = null
+    void Promise.all([import('@wailsio/runtime'), import('@bindings/events')])
+      .then(([{ Events }, { SessionStateChanged }]) => {
+        if (canceled) return
+        unsub = Events.On(SessionStateChanged, (ev: { data?: SessionStateEvent }) => {
+          if (ev?.data && typeof ev.data.tabId === 'string') {
+            handler(ev.data)
+          }
+        })
+      })
+      .catch(() => {
+        // Ignore in non-Wails preview environments
+      })
+    return () => {
+      canceled = true
+      if (unsub) {
+        unsub()
+        unsub = null
+      }
+    }
   },
 
   // --- Binary / Oversized Stream URL ---
