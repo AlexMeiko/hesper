@@ -231,8 +231,8 @@ async function copyDdl() {
         <!-- DDL Code -->
         <pre
           v-else-if="activeSection === 'ddl'"
-          class="m-0 p-3 rounded-lg border font-mono-tabular text-xs whitespace-pre-wrap break-all select-text leading-relaxed"
-          style="background: var(--bg-canvas); border-color: var(--border-subtle); color: var(--text-primary)"
+          class="m-0 p-3 rounded-lg border font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed"
+          style="background: var(--bg-canvas); border-color: var(--border-subtle); color: var(--text-primary); font-size: var(--editor-font-size)"
         >{{ ddl || '-- 无 DDL 信息' }}</pre>
       </div>
     </div>

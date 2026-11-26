@@ -5,6 +5,7 @@ import { EngineType, ErrorCode, SessionState, ValueKind, type CellValue, type Co
 import ConnectionModal from '@/components/ConnectionModal.vue'
 import DataGrid from '@/components/DataGrid.vue'
 import SessionBanner from '@/components/SessionBanner.vue'
+import SettingsModal from '@/components/SettingsModal.vue'
 import ValueInspector from '@/components/ValueInspector.vue'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
@@ -267,5 +268,68 @@ describe('4-engine workbench support (MySQL, PostgreSQL, MariaDB, SQLite)', () =
     expect(wrapper.text()).toContain('主机地址 (Host)')
     expect(wrapper.text()).toContain('TLS 加密模式')
     expect(wrapper.text()).toContain('客户端只读保护')
+  })
+
+  it('manages theme (system/light/dark) and fontScale via SettingsModal with persistence', async () => {
+    const mediaChangeListeners: Array<(ev: MediaQueryListEvent) => void> = []
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: true, // OS prefers dark
+        media: query,
+        addEventListener: (_: string, cb: (ev: MediaQueryListEvent) => void) => {
+          mediaChangeListeners.push(cb)
+        },
+        removeEventListener: vi.fn(),
+      })),
+    )
+
+    try {
+      const settings = useSettingsStore()
+      // Defaults: follow system (dark here) + standard font scale
+      expect(settings.themePreference).toBe('system')
+      expect(settings.theme).toBe('dark')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+      expect(settings.fontScale).toBe('standard')
+      expect(document.documentElement.getAttribute('data-font-scale')).toBe('standard')
+
+      // Simulate OS switching to light while in system mode
+      expect(mediaChangeListeners.length).toBeGreaterThan(0)
+      mediaChangeListeners.forEach((cb) => cb({ matches: false } as MediaQueryListEvent))
+      await Promise.resolve()
+      expect(settings.theme).toBe('light')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('light')
+
+      // Open SettingsModal and interact with controls
+      settings.openSettingsModal()
+      const wrapper = mount(SettingsModal)
+      expect(wrapper.find('[data-testid="settings-modal"]').exists()).toBe(true)
+      expect(wrapper.text()).toContain('跟随系统')
+      expect(wrapper.text()).toContain('亮色')
+      expect(wrapper.text()).toContain('暗色')
+
+      await wrapper.find('[data-testid="theme-option-dark"]').trigger('click')
+      expect(settings.themePreference).toBe('dark')
+      expect(settings.theme).toBe('dark')
+      expect(localStorage.getItem('sqlm:theme')).toBe('dark')
+      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
+
+      await wrapper.find('[data-testid="theme-option-light"]').trigger('click')
+      expect(settings.themePreference).toBe('light')
+      expect(settings.theme).toBe('light')
+      expect(localStorage.getItem('sqlm:theme')).toBe('light')
+
+      await wrapper.find('[data-testid="font-scale-option-comfortable"]').trigger('click')
+      expect(settings.fontScale).toBe('comfortable')
+      expect(localStorage.getItem('sqlm:fontScale')).toBe('comfortable')
+      expect(document.documentElement.getAttribute('data-font-scale')).toBe('comfortable')
+
+      await wrapper.find('[data-testid="font-scale-option-compact"]').trigger('click')
+      expect(settings.fontScale).toBe('compact')
+      expect(localStorage.getItem('sqlm:fontScale')).toBe('compact')
+      expect(document.documentElement.getAttribute('data-font-scale')).toBe('compact')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

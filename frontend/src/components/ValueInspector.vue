@@ -247,8 +247,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         <pre
           v-else
           data-testid="value-inspector-content"
-          class="m-0 font-mono-tabular text-xs whitespace-pre-wrap break-all select-text leading-relaxed"
-          style="color: var(--text-primary)"
+          class="m-0 font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed"
+          style="color: var(--text-primary); font-size: var(--editor-font-size)"
         ><template v-if="settings.showWhitespace && item.cell.kind !== ValueKind.KindBinary"><template
             v-for="(tok, tIdx) in tokenizeWhitespace(displayContent, true)"
             :key="tIdx"

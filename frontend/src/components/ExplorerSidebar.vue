@@ -159,11 +159,11 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
     <!-- Header & Search Filter -->
     <div class="p-2.5 border-b space-y-2 shrink-0" style="border-color: var(--border-subtle)">
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs font-semibold tracking-wide" style="color: var(--text-secondary)">对象浏览器</span>
+        <span class="text-[13px] font-semibold tracking-wide" style="color: var(--text-secondary)">对象浏览器</span>
         <div class="flex items-center gap-1">
           <button
             type="button"
-            class="btn btn-ghost !h-6 !px-1.5 !text-[11px]"
+            class="btn btn-ghost !h-7 !px-2 !text-xs"
             :class="showSystemDbs ? '!text-[var(--accent-text)]' : ''"
             title="显示/隐藏系统库"
             @click="showSystemDbs = !showSystemDbs"
@@ -172,11 +172,11 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
           </button>
           <button
             type="button"
-            class="btn btn-ghost !w-6 !h-6 !p-0"
+            class="btn btn-ghost !w-7 !h-7 !p-0"
             title="新建数据库连接"
             @click="connStore.openNewConnectionModal()"
           >
-            <Plus class="w-3.5 h-3.5" />
+            <Plus class="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -189,14 +189,14 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
         <input
           v-model="filterText"
           type="text"
-          class="input-field input-field-sm w-full !pl-7"
+          class="input-field input-field-sm w-full !pl-8"
           placeholder="过滤表 / 视图名称..."
         />
       </div>
     </div>
 
     <!-- Connections Tree -->
-    <div class="flex-1 min-h-0 overflow-y-auto p-1.5 space-y-1">
+    <div class="flex-1 min-h-0 overflow-y-auto p-1.5 space-y-1" style="font-size: var(--tree-font-size)">
       <div
         v-if="connStore.connections.length === 0"
         class="px-3 py-8 text-center space-y-3"
@@ -232,18 +232,18 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
 
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5 min-w-0">
-              <span class="text-xs font-medium truncate" style="color: var(--text-primary)" :title="conn.name">
+              <span class="font-medium truncate" style="color: var(--text-primary)" :title="conn.name">
                 {{ conn.name }}
               </span>
               <Shield
                 v-if="conn.readOnly"
-                class="w-3 h-3 shrink-0"
+                class="w-3.5 h-3.5 shrink-0"
                 style="color: var(--warning)"
                 :title="conn.driver === 'sqlite' ? 'SQLite 引擎级只读模式 (mode=ro)' : '已开启客户端只读保护'"
               />
             </div>
             <div
-              class="text-[10px] font-mono-tabular truncate"
+              class="text-[11px] font-mono-tabular truncate mt-0.5"
               style="color: var(--text-faint)"
               :title="conn.driver === 'sqlite' ? conn.params.filePath : `${conn.params.host}:${conn.params.port}`"
             >
@@ -313,7 +313,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
         >
           <div
             v-if="connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.loading"
-            class="px-2 py-1 text-[11px]"
+            class="px-2 py-1 text-xs"
             style="color: var(--text-muted)"
           >
             加载中...
@@ -333,7 +333,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
               "
             >
               <Table2 class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
-              <span class="text-xs truncate flex-1">{{ tbl.name }}</span>
+              <span class="truncate flex-1">{{ tbl.name }}</span>
               <button
                 type="button"
                 class="hidden group-hover:inline-flex btn btn-ghost !w-5 !h-5 !p-0"
@@ -361,7 +361,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
               @dblclick="wsStore.openTableBrowse(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '', vw.name)"
             >
               <Eye class="w-3.5 h-3.5 shrink-0" style="color: var(--accent-text)" />
-              <span class="text-xs truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
+              <span class="truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
             </div>
 
             <div
@@ -371,7 +371,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                 (connStore.objectsMap[connStore.objKey(conn.id, connStore.activeMap[conn.id]?.currentDb || 'main', '')]?.views
                   ?.length ?? 0) === 0
               "
-              class="px-2 py-1 text-[11px]"
+              class="px-2 py-1 text-xs"
               style="color: var(--text-faint)"
             >
               暂无用户表或视图
@@ -395,12 +395,12 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
             >
               <ChevronDown
                 v-if="expandedDbs[connStore.dbKey(conn.id, db.name)]"
-                class="w-3 h-3 shrink-0"
+                class="w-3.5 h-3.5 shrink-0"
                 style="color: var(--text-muted)"
               />
-              <ChevronRight v-else class="w-3 h-3 shrink-0" style="color: var(--text-muted)" />
+              <ChevronRight v-else class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
               <Database class="w-3.5 h-3.5 shrink-0" style="color: var(--accent)" />
-              <span class="text-xs truncate flex-1" :style="{ color: db.isSystem ? 'var(--text-muted)' : 'var(--text-primary)' }">
+              <span class="truncate flex-1" :style="{ color: db.isSystem ? 'var(--text-muted)' : 'var(--text-primary)' }">
                 {{ db.name }}
               </span>
               <div class="hidden group-hover:flex items-center gap-0.5" @click.stop>
@@ -441,12 +441,12 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                   >
                     <ChevronDown
                       v-if="expandedSchemas[connStore.objKey(conn.id, db.name, sch)]"
-                      class="w-3 h-3 shrink-0"
+                      class="w-3.5 h-3.5 shrink-0"
                       style="color: var(--text-muted)"
                     />
-                    <ChevronRight v-else class="w-3 h-3 shrink-0" style="color: var(--text-muted)" />
+                    <ChevronRight v-else class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
                     <Layers class="w-3.5 h-3.5 shrink-0" style="color: var(--text-secondary)" />
-                    <span class="text-xs truncate flex-1">{{ sch }}</span>
+                    <span class="truncate flex-1">{{ sch }}</span>
                     <button
                       type="button"
                       class="hidden group-hover:inline-flex btn btn-ghost !w-5 !h-5 !p-0"
@@ -464,7 +464,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                   >
                     <div
                       v-if="connStore.objectsMap[connStore.objKey(conn.id, db.name, sch)]?.loading"
-                      class="px-2 py-1 text-[11px]"
+                      class="px-2 py-1 text-xs"
                       style="color: var(--text-muted)"
                     >
                       加载中...
@@ -480,7 +480,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                         @contextmenu="openTableContextMenu($event, conn.id, db.name, sch, tbl.name)"
                       >
                         <Table2 class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
-                        <span class="text-xs truncate flex-1">{{ tbl.name }}</span>
+                        <span class="truncate flex-1">{{ tbl.name }}</span>
                         <button
                           type="button"
                           class="hidden group-hover:inline-flex btn btn-ghost !w-5 !h-5 !p-0"
@@ -499,7 +499,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                         @dblclick="wsStore.openTableBrowse(conn.id, db.name, sch, vw.name)"
                       >
                         <Eye class="w-3.5 h-3.5 shrink-0" style="color: var(--accent-text)" />
-                        <span class="text-xs truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
+                        <span class="truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
                       </div>
 
                       <div
@@ -508,8 +508,8 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                         class="flex items-center gap-1.5 px-2 py-1 rounded-md"
                         style="color: var(--text-muted)"
                       >
-                        <Hash class="w-3 h-3 shrink-0" />
-                        <span class="text-[11px] truncate flex-1">{{ seq.name }}</span>
+                        <Hash class="w-3.5 h-3.5 shrink-0" />
+                        <span class="text-xs truncate flex-1">{{ seq.name }}</span>
                       </div>
                     </template>
                   </div>
@@ -522,7 +522,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
               <div class="pl-4 space-y-0.5">
                 <div
                   v-if="connStore.objectsMap[connStore.objKey(conn.id, db.name, '')]?.loading"
-                  class="px-2 py-1 text-[11px]"
+                  class="px-2 py-1 text-xs"
                   style="color: var(--text-muted)"
                 >
                   加载中...
@@ -538,10 +538,10 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                     @contextmenu="openTableContextMenu($event, conn.id, db.name, '', tbl.name)"
                   >
                     <Table2 class="w-3.5 h-3.5 shrink-0" style="color: var(--text-muted)" />
-                    <span class="text-xs truncate flex-1">{{ tbl.name }}</span>
+                    <span class="truncate flex-1">{{ tbl.name }}</span>
                     <span
                       v-if="tbl.engine && tbl.engine.toLowerCase() !== 'innodb'"
-                      class="text-[10px] px-1 rounded"
+                      class="text-[11px] px-1 rounded"
                       style="background: var(--bg-subtle); color: var(--text-faint)"
                     >
                       {{ tbl.engine }}
@@ -564,7 +564,7 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                     @dblclick="wsStore.openTableBrowse(conn.id, db.name, '', vw.name)"
                   >
                     <Eye class="w-3.5 h-3.5 shrink-0" style="color: var(--accent-text)" />
-                    <span class="text-xs truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
+                    <span class="truncate flex-1" style="color: var(--text-secondary)">{{ vw.name }}</span>
                   </div>
 
                   <!-- MariaDB Sequences (capabilities.supportsSequences && !hasSchemas) -->
@@ -575,8 +575,8 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                     style="color: var(--text-muted)"
                     title="MariaDB 序列 (SEQUENCE)"
                   >
-                    <Hash class="w-3 h-3 shrink-0" />
-                    <span class="text-[11px] truncate flex-1">{{ seq.name }}</span>
+                    <Hash class="w-3.5 h-3.5 shrink-0" />
+                    <span class="text-xs truncate flex-1">{{ seq.name }}</span>
                   </div>
                 </template>
               </div>

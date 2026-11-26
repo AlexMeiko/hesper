@@ -37,10 +37,38 @@
   --env-green: #16a34a;
   --env-default: #2563eb;
 
-  --font-sans: 'Inter', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: 'Inter', 'Segoe UI Variable', 'Segoe UI', 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', 'Cascadia Code', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --ui-root-size: 16px;
+  --ui-body-size: 13.5px;
+  --tree-font-size: 13px;
+  --grid-font-size: 13px;
+  --grid-header-font-size: 12.5px;
+  --grid-type-font-size: 11px;
+  --editor-font-size: 13.5px;
 
   color-scheme: light;
+}
+
+[data-font-scale="compact"] {
+  --ui-root-size: 15px;
+  --ui-body-size: 12.5px;
+  --tree-font-size: 12px;
+  --grid-font-size: 12px;
+  --grid-header-font-size: 12px;
+  --grid-type-font-size: 10.5px;
+  --editor-font-size: 12.5px;
+}
+
+[data-font-scale="comfortable"] {
+  --ui-root-size: 17px;
+  --ui-body-size: 14.5px;
+  --tree-font-size: 14px;
+  --grid-font-size: 14px;
+  --grid-header-font-size: 13.5px;
+  --grid-type-font-size: 11.5px;
+  --editor-font-size: 14.5px;
 }
 
 [data-theme="dark"] {
@@ -82,6 +110,10 @@
   box-sizing: border-box;
 }
 
+html {
+  font-size: var(--ui-root-size);
+}
+
 html,
 body,
 #app {
@@ -93,9 +125,13 @@ body,
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 13px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+
+body,
+#app {
+  font-size: var(--ui-body-size);
 }
 
 .font-mono-tabular {
@@ -128,10 +164,10 @@ body,
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 28px;
+  height: 30px;
   padding: 0 11px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 0.8125rem;
   font-weight: 500;
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
@@ -192,13 +228,13 @@ body,
 }
 
 .input-field {
-  height: 34px;
+  height: 36px;
   padding: 0 11px;
   border-radius: 6px;
   border: 1px solid var(--border-strong);
   background-color: var(--bg-canvas);
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.4;
   outline: none;
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
@@ -210,9 +246,9 @@ body,
 }
 
 .input-field-sm {
-  height: 28px;
+  height: 30px;
   padding: 0 10px;
-  font-size: 12px;
+  font-size: 0.8125rem;
   line-height: 1.35;
 }
 
@@ -230,9 +266,9 @@ select.input-field {
 }
 
 select.select-sm {
-  height: 28px;
+  height: 30px;
   padding: 0 28px 0 10px;
-  font-size: 12px;
+  font-size: 0.8125rem;
   line-height: normal;
   background-position: right 8px center;
 }
@@ -307,7 +343,8 @@ select.input-field option {
 .cm-editor {
   height: 100%;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--editor-font-size);
+  line-height: 1.55;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
 }

@@ -9,6 +9,7 @@ import CommandPalette from './components/CommandPalette.vue'
 import ConnectionModal from './components/ConnectionModal.vue'
 import ExplorerSidebar from './components/ExplorerSidebar.vue'
 import QueryTabView from './components/QueryTabView.vue'
+import SettingsModal from './components/SettingsModal.vue'
 import TableBrowseView from './components/TableBrowseView.vue'
 import TableDdlModal from './components/TableDdlModal.vue'
 import TopBar from './components/TopBar.vue'
@@ -82,13 +83,13 @@ onBeforeUnmount(() => {
         <!-- Open Tabs Bar -->
         <div
           v-if="wsStore.tabs.length > 0"
-          class="h-9 px-1.5 border-b flex items-center gap-1 overflow-x-auto shrink-0 select-none"
+          class="h-10 px-2 border-b flex items-center gap-1.5 overflow-x-auto shrink-0 select-none"
           style="background: var(--bg-surface); border-color: var(--border-subtle)"
         >
           <div
             v-for="tab in wsStore.tabs"
             :key="tab.id"
-            class="group relative h-7 px-2.5 rounded-md flex items-center gap-1.5 text-xs cursor-pointer max-w-[220px] shrink-0 border transition-colors"
+            class="group relative h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[13px] cursor-pointer max-w-[240px] shrink-0 border transition-colors"
             :style="{
               background: wsStore.activeTabId === tab.id ? 'var(--bg-canvas)' : 'transparent',
               borderColor: wsStore.activeTabId === tab.id ? 'var(--border-strong)' : 'transparent',
@@ -210,6 +211,7 @@ onBeforeUnmount(() => {
 
     <!-- Global Modals -->
     <ConnectionModal />
+    <SettingsModal />
     <TableDdlModal />
     <CommandPalette />
     <ValueInspector

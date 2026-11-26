@@ -130,22 +130,22 @@ function openNewQueryFromTable() {
       class="px-3 py-2 border-b flex flex-wrap items-center gap-2 shrink-0"
       style="background: var(--bg-surface); border-color: var(--border-subtle)"
     >
-      <div class="flex items-center gap-1.5 mr-1">
+      <div class="flex items-center gap-2 mr-1">
         <span
-          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
+          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
           style="background: var(--success-soft); color: var(--success)"
           title="双击表打开实时表浏览：按稳定键排序实时查库，与编辑器一次性快照严格分离"
         >
-          <Table2 class="w-3 h-3" />
+          <Table2 class="w-3.5 h-3.5" />
           实时浏览
         </span>
-        <span class="text-xs font-medium" style="color: var(--text-primary)">
+        <span class="text-[13px] font-medium" style="color: var(--text-primary)">
           {{ displayTablePath }}
         </span>
       </div>
 
       <!-- Quick WHERE Filter -->
-      <div class="flex items-center gap-1 flex-1 min-w-[220px] max-w-md">
+      <div class="flex items-center gap-1.5 flex-1 min-w-[220px] max-w-md">
         <div class="relative flex-1">
           <Filter
             class="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
@@ -154,7 +154,7 @@ function openNewQueryFromTable() {
           <input
             v-model="tab.filterWhere"
             type="text"
-            class="input-field input-field-sm w-full !pl-7 font-mono-tabular"
+            class="input-field input-field-sm w-full !pl-8 font-mono-tabular"
             placeholder="WHERE 过滤条件，例如 id > 10（按 Enter 应用）"
             @keydown.enter="applyFilter"
           />
@@ -205,7 +205,7 @@ function openNewQueryFromTable() {
       style="background: var(--bg-subtle); border-color: var(--border-subtle); color: var(--text-secondary)"
     >
       <span class="truncate select-text" :title="tab.response.executedSql">{{ tab.response.executedSql }}</span>
-      <span v-if="tab.response.stableOrderUsed" class="shrink-0 text-[11px]" style="color: var(--text-muted)">
+      <span v-if="tab.response.stableOrderUsed" class="shrink-0 text-xs" style="color: var(--text-muted)">
         稳定排序: {{ (tab.response.orderColumns ?? []).join(', ') }}
       </span>
     </div>
@@ -230,7 +230,7 @@ function openNewQueryFromTable() {
           <ChevronLeft class="w-3.5 h-3.5" />
           上一页
         </button>
-        <span class="font-mono-tabular text-xs px-1">第 {{ tab.page }} 页</span>
+        <span class="font-mono-tabular text-[13px] px-1">第 {{ tab.page }} 页</span>
         <button
           type="button"
           class="btn"
@@ -243,7 +243,7 @@ function openNewQueryFromTable() {
 
         <select
           :value="tab.pageSize"
-          class="input-field select-sm ml-1 min-w-[104px]"
+          class="input-field select-sm ml-1 min-w-[114px]"
           @change="onPageSizeChange"
         >
           <option :value="100">100 行/页</option>
@@ -252,7 +252,7 @@ function openNewQueryFromTable() {
           <option :value="1000">1000 行/页</option>
         </select>
 
-        <span v-if="tab.response" class="font-mono-tabular text-[11px] ml-2" style="color: var(--text-muted)">
+        <span v-if="tab.response" class="font-mono-tabular text-xs ml-2" style="color: var(--text-muted)">
           本页 {{ rows.length }} 行
           <template v-if="tab.response.totalKnown"> · 共 {{ tab.response.totalRows }} 行</template>
           · {{ formatDuration(tab.response.durationMs) }}
@@ -261,7 +261,7 @@ function openNewQueryFromTable() {
 
       <div
         v-if="editabilitySummary"
-        class="flex items-center gap-1.5 text-[11px]"
+        class="flex items-center gap-1.5 text-xs"
         style="color: var(--text-muted)"
         :title="(tab.response?.editability.reasons ?? []).join('；')"
       >

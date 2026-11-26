@@ -40,8 +40,8 @@ export function cellToPlainText(cell: CellValue | null | undefined): string {
  */
 export function estimateTextWidth(text: string, isMono = false, maxChars = 160): number {
   const sample = text.length > maxChars ? text.slice(0, maxChars) : text
-  const asciiPx = isMono ? 7.9 : 7.4
-  const widePx = isMono ? 13.5 : 13.0
+  const asciiPx = isMono ? 8.3 : 7.8
+  const widePx = isMono ? 13.8 : 13.4
   let px = 0
   for (let i = 0; i < sample.length; i++) {
     const code = sample.charCodeAt(i)
@@ -68,7 +68,11 @@ export function estimateColumnWidth(
 ): number {
   const autoFit = Boolean(opts?.autoFit)
   const sampleLimit = autoFit ? rows.length : Math.min(rows.length, opts?.maxSampleRows ?? 100)
-  const isMono = isNumericKind(col.kind) || col.kind === ValueKind.KindDateTime || col.kind === ValueKind.KindBinary
+  const isMono =
+    isNumericKind(col.kind) ||
+    col.kind === ValueKind.KindDateTime ||
+    col.kind === ValueKind.KindBinary ||
+    col.kind === ValueKind.KindJSON
 
   const headerNamePx = estimateTextWidth(col.name, false) + (col.isPrimaryKey ? 18 : 0) + 34
   const headerTypePx = estimateTextWidth(col.databaseType || col.kind, true) + 24

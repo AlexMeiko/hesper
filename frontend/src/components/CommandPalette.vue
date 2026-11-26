@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { FilePlus2, Moon, Plug, Plus, Search, Sun, Table2 } from 'lucide-vue-next'
+import { FilePlus2, Moon, Plug, Plus, Search, Settings, Sun, Table2 } from 'lucide-vue-next'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -32,9 +32,16 @@ const entries = computed<PaletteEntry[]>(() => {
       run: () => connStore.openNewConnectionModal(),
     },
     {
+      id: 'act-settings',
+      kind: 'action',
+      label: '打开偏好设置',
+      sub: '调整亮暗色主题（跟随系统/亮色/暗色）与界面字号',
+      run: () => settings.openSettingsModal(),
+    },
+    {
       id: 'act-theme',
       kind: 'action',
-      label: settings.theme === 'dark' ? '切换到浅色外观' : '切换到深色外观',
+      label: settings.theme === 'dark' ? '切换到亮色外观' : '切换到暗色外观',
       sub: '立即切换工作台配色主题',
       run: () => settings.toggleTheme(),
     },
@@ -167,6 +174,7 @@ function onKeydown(ev: KeyboardEvent) {
           <Table2 v-if="item.kind === 'table'" class="w-4 h-4 shrink-0 opacity-80" />
           <Plug v-else-if="item.kind === 'connection'" class="w-4 h-4 shrink-0 opacity-80" />
           <Plus v-else-if="item.id === 'act-new-conn'" class="w-4 h-4 shrink-0 opacity-80" />
+          <Settings v-else-if="item.id === 'act-settings'" class="w-4 h-4 shrink-0 opacity-80" />
           <Sun v-else-if="settings.theme === 'dark'" class="w-4 h-4 shrink-0 opacity-80" />
           <Moon v-else class="w-4 h-4 shrink-0 opacity-80" />
 

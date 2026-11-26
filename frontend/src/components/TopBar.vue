@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Database, FilePlus2, Moon, Plus, Search, Shield, Sun, X } from 'lucide-vue-next'
+import { Database, FilePlus2, Plus, Search, Settings, Shield, X } from 'lucide-vue-next'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -87,7 +87,7 @@ function quickNewQuery() {
     <!-- Center: Always-Visible Active Connection & DB Context -->
     <div
       v-if="activeContext"
-      class="hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-xs max-w-md truncate"
+      class="hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-[13px] max-w-md truncate"
       style="background: var(--bg-canvas); border-color: var(--border-subtle)"
     >
       <span class="w-2 h-2 rounded-full shrink-0" :style="{ background: envColorHex(activeContext.conn.envColor) }" />
@@ -97,7 +97,7 @@ function quickNewQuery() {
       </span>
       <span
         v-if="activeContext.version"
-        class="font-mono-tabular text-[11px] shrink-0"
+        class="font-mono-tabular text-xs shrink-0"
         style="color: var(--text-faint)"
       >
         {{ activeContext.version.split(' ')[0] }}
@@ -110,11 +110,11 @@ function quickNewQuery() {
       />
     </div>
 
-    <!-- Right: Quick Jump Palette + Theme Switch -->
+    <!-- Right: Quick Jump Palette + Settings -->
     <div class="flex items-center gap-1.5">
       <button
         type="button"
-        class="btn !text-[11px] !px-2.5"
+        class="btn !text-xs !px-2.5"
         style="color: var(--text-muted)"
         title="快速跳转表、连接或命令 (Ctrl+K)"
         @click="wsStore.commandPaletteOpen = true"
@@ -122,7 +122,7 @@ function quickNewQuery() {
         <Search class="w-3.5 h-3.5" />
         <span>快速跳转</span>
         <kbd
-          class="ml-1 px-1 py-0 rounded border font-mono-tabular text-[10px]"
+          class="ml-1 px-1 py-0 rounded border font-mono-tabular text-[11px]"
           style="border-color: var(--border-strong)"
         >
           Ctrl+K
@@ -131,12 +131,12 @@ function quickNewQuery() {
 
       <button
         type="button"
-        class="btn btn-ghost !w-7 !h-7 !p-0"
-        :title="settings.theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'"
-        @click="settings.toggleTheme()"
+        data-testid="open-settings-btn"
+        class="btn btn-ghost !w-8 !h-8 !p-0"
+        title="偏好设置（外观主题与界面字号）"
+        @click="settings.openSettingsModal()"
       >
-        <Sun v-if="settings.theme === 'dark'" class="w-4 h-4" />
-        <Moon v-else class="w-4 h-4" />
+        <Settings class="w-4 h-4" />
       </button>
     </div>
 

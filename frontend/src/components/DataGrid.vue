@@ -92,17 +92,33 @@ watch(
   { immediate: true },
 )
 
-const ROW_HEIGHT = 28
-const ROW_NUM_WIDTH = 52
+const rowHeight = computed(() => {
+  switch (settings.fontScale) {
+    case 'compact':
+      return 28
+    case 'comfortable':
+      return 34
+    default:
+      return 31
+  }
+})
+const ROW_NUM_WIDTH = 56
 
 const rowVirtualizer = useVirtualizer(
   computed(() => ({
     count: props.rows.length,
     getScrollElement: () => scrollContainerRef.value,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeight.value,
     overscan: 14,
     initialRect: { width: 1000, height: 480 },
   })),
+)
+
+watch(
+  () => settings.fontScale,
+  () => {
+    rowVirtualizer.value.measure()
+  },
 )
 
 const virtualRows = computed(() => rowVirtualizer.value.getVirtualItems())
@@ -334,7 +350,7 @@ function singleCellLengthLabel(cell: CellValue): string {
         >
           <!-- Sticky Left Row-Number Header -->
           <div
-            class="sticky left-0 z-30 shrink-0 flex items-center justify-center text-[11px] font-mono-tabular border-r"
+            class="sticky left-0 z-30 shrink-0 flex items-center justify-center text-xs font-mono-tabular border-r"
             :style="{
               width: `${ROW_NUM_WIDTH}px`,
               background: 'var(--bg-surface)',
@@ -349,7 +365,7 @@ function singleCellLengthLabel(cell: CellValue): string {
             v-for="(col, colIdx) in columns"
             :key="`${col.name}-${colIdx}`"
             :data-col-idx="colIdx"
-            class="shrink-0 relative flex flex-col justify-center px-2.5 py-1.5 border-r group"
+            class="shrink-0 relative flex flex-col justify-center px-2.5 py-2 border-r group"
             :class="sortable ? 'cursor-pointer hover:bg-[var(--bg-subtle)]' : ''"
             :style="{ width: `${colWidths[colIdx] ?? 160}px`, borderColor: 'var(--border-subtle)' }"
             @click="sortable && emit('sort', col.name)"
@@ -357,19 +373,26 @@ function singleCellLengthLabel(cell: CellValue): string {
             <div class="flex items-center gap-1 min-w-0">
               <KeyRound
                 v-if="col.isPrimaryKey"
-                class="w-3 h-3 shrink-0"
+                class="w-3.5 h-3.5 shrink-0"
                 style="color: var(--warning)"
                 title="主键列"
               />
-              <span class="font-medium text-xs truncate" style="color: var(--text-primary)" :title="col.name">
+              <span
+                class="font-medium truncate leading-snug"
+                style="color: var(--text-primary); font-size: var(--grid-header-font-size)"
+                :title="col.name"
+              >
                 {{ col.name }}
               </span>
               <span v-if="sortable && sortColumn === col.name" class="ml-auto shrink-0" style="color: var(--accent)">
-                <ArrowUp v-if="sortDir === 'asc'" class="w-3 h-3" />
-                <ArrowDown v-else-if="sortDir === 'desc'" class="w-3 h-3" />
+                <ArrowUp v-if="sortDir === 'asc'" class="w-3.5 h-3.5" />
+                <ArrowDown v-else-if="sortDir === 'desc'" class="w-3.5 h-3.5" />
               </span>
             </div>
-            <div class="text-[10px] font-mono-tabular truncate" style="color: var(--text-faint)">
+            <div
+              class="font-mono-tabular truncate leading-tight mt-0.5"
+              style="color: var(--text-faint); font-size: var(--grid-type-font-size)"
+            >
               {{ col.databaseType || col.kind }}
             </div>
 
@@ -387,20 +410,20 @@ function singleCellLengthLabel(cell: CellValue): string {
         <!-- Empty Rows Hint -->
         <div
           v-if="rows.length === 0 && !loading"
-          class="py-12 text-center text-xs"
+          class="py-12 text-center text-sm"
           style="color: var(--text-muted)"
         >
           查询返回 0 行数据
         </div>
 
-        <!-- Virtualized Rows Container (strictly single-line 28px rows) -->
+        <!-- Virtualized Rows Container (strictly single-line rows) -->
         <div v-else class="relative" :style="{ height: `${totalHeight}px` }">
           <div
             v-for="vRow in virtualRows"
             :key="vRow.index"
             class="absolute left-0 right-0 flex border-b"
             :style="{
-              height: `${ROW_HEIGHT}px`,
+              height: `${rowHeight}px`,
               transform: `translateY(${vRow.start}px)`,
               borderColor: 'var(--border-subtle)',
               background: vRow.index % 2 === 1 ? 'var(--bg-surface)' : 'var(--bg-canvas)',
@@ -408,7 +431,7 @@ function singleCellLengthLabel(cell: CellValue): string {
           >
             <!-- Sticky Left Row Number -->
             <div
-              class="sticky left-0 z-10 shrink-0 flex items-center justify-center text-[11px] font-mono-tabular border-r"
+              class="sticky left-0 z-10 shrink-0 flex items-center justify-center text-xs font-mono-tabular border-r"
               :style="{
                 width: `${ROW_NUM_WIDTH}px`,
                 borderColor: 'var(--border-subtle)',
@@ -423,13 +446,14 @@ function singleCellLengthLabel(cell: CellValue): string {
             <div
               v-for="(col, colIdx) in columns"
               :key="colIdx"
-              class="shrink-0 flex items-center px-2.5 border-r text-xs overflow-hidden whitespace-nowrap"
+              class="shrink-0 flex items-center px-2.5 border-r overflow-hidden whitespace-nowrap"
               :class="[
                 isNumericKind(col.kind) ? 'justify-end font-mono-tabular' : '',
                 col.kind === ValueKind.KindDateTime ? 'font-mono-tabular' : '',
               ]"
               :style="{
                 width: `${colWidths[colIdx] ?? 160}px`,
+                fontSize: 'var(--grid-font-size)',
                 borderColor: 'var(--border-subtle)',
                 color: 'var(--text-primary)',
                 background: isCellSelected(vRow.index, colIdx) ? 'var(--bg-selected)' : undefined,
@@ -463,7 +487,7 @@ function singleCellLengthLabel(cell: CellValue): string {
               <span
                 v-else-if="rows[vRow.index]?.[colIdx]?.kind === ValueKind.KindBinary"
                 data-cell-kind="binary"
-                class="truncate font-mono-tabular text-[11px]"
+                class="truncate font-mono-tabular text-xs"
                 title="双击弹出浮窗查看完整十六进制或下载"
               >
                 <span style="color: var(--text-muted)">BLOB {{ formatBytes(rows[vRow.index]?.[colIdx]?.byteLength) }}</span>
@@ -506,7 +530,7 @@ function singleCellLengthLabel(cell: CellValue): string {
 
     <!-- Bottom Status Bar: Single-Cell Full Preview OR Multi-Cell Stats + Whitespace Toggle + Copy/Export -->
     <div
-      class="shrink-0 h-8 px-3 border-t flex items-center justify-between gap-3 text-[11px]"
+      class="shrink-0 h-9 px-3 border-t flex items-center justify-between gap-3 text-xs"
       style="background: var(--bg-surface); border-color: var(--border-subtle); color: var(--text-muted)"
     >
       <!-- Left: Live Value Preview (single cell) OR Multi-Cell Selection Stats -->
@@ -542,7 +566,7 @@ function singleCellLengthLabel(cell: CellValue): string {
             </template>
             <template v-else>{{ singleSelectedCell.cell.text }}</template>
           </span>
-          <span class="shrink-0 font-mono-tabular text-[10px]" style="color: var(--text-faint)">
+          <span class="shrink-0 font-mono-tabular text-[11px]" style="color: var(--text-faint)">
             ({{ singleCellLengthLabel(singleSelectedCell.cell) }})
           </span>
         </template>
@@ -567,7 +591,7 @@ function singleCellLengthLabel(cell: CellValue): string {
         <button
           type="button"
           data-testid="toggle-whitespace-btn"
-          class="btn !h-6 !px-2 !text-[11px]"
+          class="btn !h-7 !px-2 !text-xs"
           :class="
             settings.showWhitespace
               ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]'
@@ -576,36 +600,36 @@ function singleCellLengthLabel(cell: CellValue): string {
           title="显示/隐藏不可见字符（空格 · / 制表符 → / 换行 ↵ / 零宽字符），不影响复制原文"
           @click="settings.toggleWhitespace()"
         >
-          <Pilcrow class="w-3 h-3" />
+          <Pilcrow class="w-3.5 h-3.5" />
           空白符
         </button>
 
         <button
           v-if="selectionBounds"
           type="button"
-          class="btn btn-ghost !h-6 !px-1.5 !text-[11px]"
+          class="btn btn-ghost !h-7 !px-2 !text-xs"
           title="浮窗查看完整内容 (Space)"
           @click="inspectSelectedCell"
         >
-          <Eye class="w-3 h-3" />
+          <Eye class="w-3.5 h-3.5" />
           查看全文
         </button>
 
         <button
           v-if="selectionBounds"
           type="button"
-          class="btn btn-ghost !h-6 !px-1.5 !text-[11px]"
+          class="btn btn-ghost !h-7 !px-2 !text-xs"
           title="复制原始值 (Ctrl+C)"
           @click="copySelectedCell"
         >
-          <Copy class="w-3 h-3" />
+          <Copy class="w-3.5 h-3.5" />
           复制值
         </button>
 
         <div class="relative">
           <button
             type="button"
-            class="btn btn-ghost !h-6 !px-1.5 !text-[11px]"
+            class="btn btn-ghost !h-7 !px-2 !text-xs"
             :disabled="rows.length === 0"
             @click="copyMenuOpen = !copyMenuOpen"
           >
