@@ -12,9 +12,9 @@
   - **MySQL / MariaDB / PostgreSQL / SQLite**：共用同一套高频交互语义，驱动按 `Capabilities` 自动呈现真实层级——PostgreSQL 展示 `Database → Schema → Table / View / Sequence`，MariaDB 展示 `Database → Table / View / Sequence`，MySQL 展示 `Database → Table / View`，SQLite 单文件直接展示 `Table / View` 且自动隐藏库/Schema 下拉框。
   - **SQLite 本地文件模式**：支持原生文件选择框选取本地 `.db` / `.sqlite` / `.sqlite3` 文件，文件不存在直接报错而不静默建空库；只读模式直达 SQLite 引擎底层 `mode=ro` + `PRAGMA query_only = ON`。
   - **四方言 SQL 编辑器**：CodeMirror 6 按驱动自动切换 `MySQL` / `PostgreSQL` / `MariaSQL` / `SQLite` 语法高亮与表/列自动补全。
-- **人性化桌面交互（浅色 / 深色双主题）**
-  - **高频操作走短路径**：左侧对象树支持即时模糊过滤，双击表直接开启 `实时浏览`，新建查询立即进入 SQL 编辑器。
-  - **清晰上下文与防误操作**：连接环境色条（生产红 / 预发琥珀 / 开发绿 / 默认蓝）、顶部始终显示当前连接/库/版本/只读标识、`Ctrl+K` 快速跳转面板、可拖动调整侧边栏与上下分屏高度。
+- **人性化桌面交互（跟随系统 / 浅色 / 深色主题 + 三档字号）**
+  - **高频操作走短路径**：左侧对象树采用展平虚拟滚动并支持即时模糊过滤，双击表直接开启 `实时浏览`，新建查询立即进入 SQL 编辑器；切换标签保留编辑器撤销历史、光标选区、分屏比例与网格列宽。
+  - **清晰上下文与防误操作**：连接环境色条（生产红 / 预发琥珀 / 开发绿 / 默认蓝）、生产连接执行 `DROP` / `TRUNCATE` 或无 `WHERE` 的 `UPDATE` / `DELETE` 前弹出二次确认、顶部始终显示当前连接/库/版本/只读标识、统一快捷键管理（`Ctrl+K` / `Ctrl+N` / `Ctrl+W` / `Ctrl+,` / `Esc` 浮窗优先）。
   - **连接管理开箱即用**：内置 `测试连接`（展示实测引擎、版本号与毫秒耗时）、编辑连接留空不覆盖原密码、诚实提示“客户端只读保护 ≠ 数据库强只读”（SQLite 则明确标示引擎级 `mode=ro`）。
 - **每个查询标签独占一条物理连接（Track B）+ 独立元数据池（Track A）**
   - 标签 A 开启的事务、临时表不会串到标签 B；对象树浏览和补全拉取走独立元数据池，不被慢查询阻塞。
@@ -22,7 +22,7 @@
 - **严格验收保障（Gate 1 全部达成）**
   1. **停止仅影响当前语句**：每次执行分配独立 `execID`，通过旁路通道（MySQL/MariaDB `KILL QUERY`、PostgreSQL `CancelRequest`、SQLite `sqlite3_interrupt`）取消；配合取消栅栏防止迟到取消误杀排队查询 B；结果流关闭且状态明确后才复用连接，无法确认时停止复用并提示“原会话已结束”。
   2. **编辑器翻页绝不重跑 SQL**：编辑器 SQL 只执行一次并写入内存/磁盘透明溢写快照，翻页仅切片读取本次快照；快照过期明确提示且提供手动 `[重新执行 SQL]` 按钮，绝不自动重跑；双击表的 `实时浏览` 与 `一次性快照` 清晰分离。
-  3. **数据保真与写入断线诚实提示**：`BIGINT` / `DECIMAL` 原样文本呈现并按内容采样自动扩宽列宽，不经 JS `Number` 失真；`NULL` 灰字斜体、空串 `""` 无框淡灰与有值主色清晰区分，支持一键开启不可见字符显示（`·` / `→` / `↵` / `[ZWSP]`）且复制导出严格保真；网格保持单行，双击单元格弹出可滚动浮窗查看长文本、格式化 JSON 或按需通过 `/stream/{ref}` 查看/下载 BLOB；自动提交写入或显式 `COMMIT` 发出后断线回报 `ERR_COMMIT_OUTCOME_UNKNOWN`（“写入或提交结果未知”），界面仅提供核对后重建会话按钮，**绝不提供重试按钮**。
+  3. **数据保真与写入断线诚实提示**：`BIGINT` / `DECIMAL` 原样文本呈现并按内容采样自动扩宽列宽，不经 JS `Number` 失真；`NULL` 灰字斜体、空串 `""` 无框淡灰与有值主色清晰区分，后端截断文本显式标注 `截断` 徽标，支持一键开启不可见字符显示（`·` / `→` / `↵` / `[ZWSP]`）且不污染复制原文；网格支持行/列双虚拟化并保持单行，双击单元格弹出可滚动浮窗查看长文本、格式化 JSON 或按需通过 `/stream/{ref}` 查看/下载 BLOB；复制/导出支持按引擎方言引用标识符的 `INSERT SQL`（PG/SQLite 用 `"`、MySQL/MariaDB 用 `` ` ``）与大数保真 JSON，并在存在截断预览、BLOB 十六进制预览或 TSV/CSV 格式语义差异（制表符/换行转空格、`NULL` 与 `""` 均为空）时显式提示；自动提交写入或显式 `COMMIT` 发出后断线回报 `ERR_COMMIT_OUTCOME_UNKNOWN`（“写入或提交结果未知”），界面仅提供核对后重建会话按钮，**绝不提供重试按钮**。
 
 ---
 
@@ -133,8 +133,8 @@ cd frontend && pnpm test
 | **MariaDB Gate 1 全量验收** | `TestMariaDB114_Gate1_FullAcceptance` | **真实 MariaDB 11.4.13** | **通过** | `DetectedType=mariadb`、`SupportsSequences=true` 并枚举原生 `order_seq`/`invoice_seq`；旁路 `KILL QUERY` 取消慢查询保留连接/事务/临时表 + 3 轮迟到取消竞态；原生 `INSERT ... RETURNING *` Execute-Once 翻页；磁盘溢写与过期提示；MyISAM/无主键三维度可编辑性判定；极限数值/`NULL`/BLOB 保真；真实 `sqlm_ro` 拒写；TCP 断线报 `ERR_COMMIT_OUTCOME_UNKNOWN` |
 | **SQLite Gate 1 + 3.2 `VACUUM` 回归** | `TestSQLite354_Gate1_AcceptanceAndVacuumRowidRegression` | **真实 SQLite 3.54.1 文件库** | **通过** | 不存在路径报错且不静默建空库；`HasDatabases=false`/`HasSchemas=false`/`SupportsSequences=false`/`DDLTransactional=true`；**复现 `VACUUM` 导致无主键表隐式 `rowid` 从 `2 → 1` 偏移，回归断言无显式主键表与部分唯一索引表严格返回 `RowIdentityNone`，显式 `INTEGER PRIMARY KEY` / 全列非空唯一键正确通过**；引擎级 `mode=ro` 直写拒写 + 拦截 `PRAGMA query_only = OFF`；递归 CTE 慢查询中断并保留原事务与临时表；`INSERT ... RETURNING *` Execute-Once；数值/`NULL`/BLOB 保真与 `CloseTab` 零泄漏 |
 | **取消与断线边界纯单测** | `TestUnconfirmedCancelMarksSessionLost`、`TestDropAfterWriteReturnsCommitOutcomeUnknown` | `driver/fake` 纯单测（不计作真库） | **通过** | 验证未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 状态机兜底 |
-| **前端保真、安全与四库交互** | `frontend/src/__tests__/fidelity-and-safety.spec.ts` | Vitest (`happy-dom`) | **通过 (10/10)** | `DataGrid` 原样渲染极限 `BIGINT`/`DECIMAL` 且采样自动列宽；`NULL` / `""` / 不可见空白符开关（`·`/`→`/`↵`/`[NBSP]`/`[ZWSP]`）保真导出；双击可滚动浮窗；`SessionBanner` 在 `ERR_COMMIT_OUTCOME_UNKNOWN` 下严格无重试按钮；`ConnectionModal` 四库切换与 SQLite 文件模式表单 |
-| **基础组件单元测试** | `internal/sqlsplit`、`internal/resultbuf`、`internal/repository` | Go `-race` 纯单测 | **通过** | 四库方言切分与 SQLite `PRAGMA` 只读逃逸识别、内存→JSONL 磁盘溢写/硬上限/TTL 过期、`app.db` CRUD/历史/KV |
+| **前端保真、安全与四库交互** | `frontend/src/__tests__/*.spec.ts` | Vitest (`happy-dom`) | **通过 (34/34)** | `DataGrid` 原样渲染极限 `BIGINT`/`DECIMAL`、截断徽标、行/列双虚拟化、后台结果切换滚动重置与方言 `INSERT SQL` / 导出边界提示；`NULL` / `""` / 不可见空白符开关；`useShortcuts` 全局 `Esc` 浮窗优先（含 `CommandPalette`）防误取消；弹窗焦点陷阱与恢复；后端令牌绑定生产高危 SQL 二次确认与 `executedAll` 脏状态追踪；`USE` 切库补全刷新；`ExplorerSidebar` 展平虚拟树与断开确认；请求去重、同连接生命周期串行化与防乱序覆写；CodeMirror 中文 UTF-8 光标偏移与切页状态保留 |
+| **基础组件单元测试** | `internal/sqlsplit`、`internal/service`、`internal/session`、`internal/resultbuf`、`internal/repository` | Go `-race` 纯单测 | **通过** | 四库方言切分（含 MySQL/MariaDB `/*! ... */` / `/*M! ... */` 可执行注释）、括号查询/`EXPLAIN ANALYZE`/MariaDB `ANALYZE`/CTE `FOR UPDATE` 分类与 `Query` 路由校验、生产高危令牌门禁与 fail-closed 保护、内存→JSONL 磁盘溢写/硬上限/TTL 过期、`app.db` CRUD/历史/KV |
 
 ### 未验证项目（明确标注为 `待验证`）
 
@@ -158,11 +158,11 @@ sql-manager/
 ├── internal/
 │   ├── bootstrap/                             # Composition Root（Wails v3 生命周期、四库静态注册与文件选择器）
 │   ├── binding/                               # 极薄 Wails v3 方法适配器与 /stream HTTP Handler
-│   ├── service/                               # 纯 Go 用例编排（零 Wails 依赖）
+│   ├── service/                               # 纯 Go 用例编排（零 Wails 依赖，含生产高危 SQL 确认门禁）
 │   ├── session/                               # Track A 元数据池 + Track B 独占会话与取消栅栏
 │   ├── driver/                                # 消费侧小接口、TrackedConn 与 mysql(含MariaDB)/postgres/sqlite/fake
 │   ├── resultbuf/                             # Execute-Once 内存/磁盘溢写快照与大对象流式缓存
-│   ├── sqlsplit/                              # 四库方言切分、语句分类与只读逃逸识别
+│   ├── sqlsplit/                              # 四库方言切分、语句分类、高危 SQL 识别与只读逃逸识别
 │   ├── repository/                            # 本地 app.db SQLite 仓储
 │   ├── secret/                                # OS Keyring + AES-256-GCM 降级凭据库
 │   ├── platform/                              # Linux Wayland/NVIDIA 启动前图形降级保护
@@ -172,8 +172,10 @@ sql-manager/
 └── frontend/
     ├── bindings/                              # wails3 自动生成的强类型 TS Bindings
     └── src/
-        ├── api/client.ts                      # 强类型调用与 AppError 解析
-        ├── stores/                            # Pinia：settings / connections / workspace
-        ├── components/                        # TopBar / ExplorerSidebar / ConnectionModal / SqlEditor / DataGrid / TableBrowseView / QueryTabView / SessionBanner / ValueInspector / TableDdlModal / CommandPalette
+        ├── api/                               # types.ts（纯 DTO/枚举）与 client.ts（懒加载 RPC + AppError 归一化）
+        ├── composables/                       # useShortcuts（统一快捷键与 Esc 浮窗优先）/ useDragResize
+        ├── stores/                            # Pinia：settings / ui / schema / connections / workspace
+        ├── utils/                             # format / tableMeta / clipboard
+        ├── components/                        # BaseModal / ConfirmDialog / ToastHost / PaginationBar / CellText 及工作台视图
         └── __tests__/                         # Vitest 保真、安全语义与四库界面单测
 ```
