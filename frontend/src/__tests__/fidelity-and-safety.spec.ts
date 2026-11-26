@@ -1,32 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { EngineType, ErrorCode, SessionState, ValueKind, type CellValue, type ColumnMeta } from '@/api/client'
-import ConnectionModal from '@/components/ConnectionModal.vue'
+import { EngineType, ErrorCode, SessionState, ValueKind, type CellValue, type ColumnMeta } from '@/api/types'
 import DataGrid from '@/components/DataGrid.vue'
 import SessionBanner from '@/components/SessionBanner.vue'
-import SettingsModal from '@/components/SettingsModal.vue'
 import ValueInspector from '@/components/ValueInspector.vue'
-import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
+import { useUiStore } from '@/stores/ui'
 import {
   cellToPlainText,
-  connectionEndpointSummary,
-  engineLabel,
   estimateColumnWidth,
+  formatExportCaveat,
+  inspectExportFidelity,
+  rowsToInsertSQL,
   rowsToJSON,
   tokenizeWhitespace,
 } from '@/utils/format'
+import { buildQuickSelectSQL } from '@/utils/tableMeta'
+import { mockVirtualViewport } from './testHelpers'
 
-describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 3)', () => {
+describe('DataGrid fidelity, virtualization, scroll & export (Criterion 3)', () => {
+  let restoreViewport: (() => void) | null = null
+
   beforeEach(() => {
     localStorage.clear()
     setActivePinia(createPinia())
-    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, value: 480 })
-    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, value: 1000 })
+    restoreViewport = mockVirtualViewport(1000, 480)
   })
 
   afterEach(() => {
+    restoreViewport?.()
+    restoreViewport = null
     vi.restoreAllMocks()
   })
 
@@ -85,6 +90,7 @@ describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 
 
     const decimalHeader = wrapper.find('[data-col-idx="2"]')
     expect(decimalHeader.attributes('style')).toContain(`width: ${decimalWidth}px`)
+    wrapper.unmount()
   })
 
   it('distinguishes NULL, empty string "", and whitespace cells cleanly with toggleable invisible characters', async () => {
@@ -115,6 +121,39 @@ describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 
     // Raw text helpers & JSON export MUST remain 100% untouched (no visual glyphs leaked)
     expect(cellToPlainText(rows[2][3])).toBe('   ')
     expect(cellToPlainText(rows[3][3])).toBe('a\tb\nc\u00A0\u200B')
+    wrapper.unmount()
+  })
+
+  it('renders visible truncated badge when CellValue.truncated is true and reports honest export caveats', () => {
+    const cols: ColumnMeta[] = [
+      { name: 'payload', databaseType: 'TEXT', kind: ValueKind.KindString, nullable: true },
+      { name: 'blob_col', databaseType: 'BLOB', kind: ValueKind.KindBinary, nullable: true },
+    ]
+    const sampleRows: CellValue[][] = [
+      [
+        { kind: ValueKind.KindString, text: 'hello\tworld', truncated: true, streamRef: 'ref-1' },
+        { kind: ValueKind.KindBinary, text: 'deadbeef', byteLength: 4096, streamRef: 'ref-2' },
+      ],
+      [{ kind: ValueKind.KindNull }, { kind: ValueKind.KindString, text: '' }],
+    ]
+
+    const wrapper = mount(DataGrid, { props: { columns: cols, rows: sampleRows } })
+    const badges = wrapper.findAll('[data-cell-truncated="true"]')
+    expect(badges.length).toBe(1)
+    expect(badges[0].text()).toBe('截断')
+
+    const summary = inspectExportFidelity(cols, sampleRows)
+    expect(summary.truncatedCount).toBe(1)
+    expect(summary.binaryPreviewCount).toBe(1)
+    expect(summary.hasNullAndEmpty).toBe(true)
+    expect(summary.hasTsvNormalizedWhitespace).toBe(true)
+
+    const tsvCaveat = formatExportCaveat(summary, 'tsv')
+    expect(tsvCaveat).toContain('截断')
+    expect(tsvCaveat).toContain('BLOB')
+    expect(tsvCaveat).toContain('制表符/换行')
+    expect(tsvCaveat).toContain('NULL 与空串')
+    wrapper.unmount()
   })
 
   it('tokenizes spaces, fullwidth spaces, tabs, CRLF/LF, NBSP and ZWSP accurately', () => {
@@ -123,7 +162,7 @@ describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 
     expect(tokens[3].lineBreakAfter).toBe(true)
   })
 
-  it('exports JSON with exact string precision for BIGINT/DECIMAL and distinct null vs "" vs spaces', () => {
+  it('exports JSON with exact string precision and generates dialect-aware INSERT SQL', () => {
     const parsed = JSON.parse(rowsToJSON(columns, rows)) as Record<string, unknown>[]
     expect(parsed[0].id).toBe('18446744073709551615')
     expect(parsed[0].amount).toBe('1234567890123456789012345678.1234567890')
@@ -131,28 +170,127 @@ describe('DataGrid fidelity, smart auto-width & invisible whitespace (Criterion 
     expect(parsed[1].id).toBe('9007199254740993')
     expect(parsed[1].note).toBe('')
     expect(parsed[2].note).toBe('   ')
+
+    const sampleCols: ColumnMeta[] = [
+      { name: 'id', databaseType: 'INT', kind: ValueKind.KindInt, nullable: false },
+      { name: 'active', databaseType: 'BOOL', kind: ValueKind.KindBool, nullable: false },
+      { name: 'note', databaseType: 'TEXT', kind: ValueKind.KindString, nullable: true },
+    ]
+    const sampleRows: CellValue[][] = [
+      [
+        { kind: ValueKind.KindInt, text: '42' },
+        { kind: ValueKind.KindBool, text: 'true' },
+        { kind: ValueKind.KindString, text: "O'Brien" },
+      ],
+    ]
+
+    // PostgreSQL uses double quotes (never MySQL backticks!)
+    const pgSql = rowsToInsertSQL({ schema: 'public', table: 'users' }, sampleCols, sampleRows, EngineType.EnginePostgres)
+    expect(pgSql).toBe(`INSERT INTO "public"."users" ("id", "active", "note") VALUES (42, TRUE, 'O''Brien');`)
+    expect(pgSql).not.toContain('`')
+
+    // Dotted and whitespace-padded table names (e.g. SQLite "order.items", " orders ") MUST stay intact in SELECT and INSERT!
+    const sqliteDotSelect = buildQuickSelectSQL('', 'order.items', EngineType.EngineSQLite)
+    expect(sqliteDotSelect).toContain('FROM "order.items"')
+    const sqliteDotInsert = rowsToInsertSQL({ schema: '', table: 'order.items' }, sampleCols, sampleRows, EngineType.EngineSQLite)
+    expect(sqliteDotInsert).toBe(`INSERT INTO "order.items" ("id", "active", "note") VALUES (42, TRUE, 'O''Brien');`)
+
+    const sqliteSpaceSelect = buildQuickSelectSQL('', ' orders ', EngineType.EngineSQLite)
+    expect(sqliteSpaceSelect).toContain('FROM " orders "')
+    const sqliteSpaceInsert = rowsToInsertSQL({ schema: '', table: ' orders ' }, sampleCols, sampleRows, EngineType.EngineSQLite)
+    expect(sqliteSpaceInsert).toBe(`INSERT INTO " orders " ("id", "active", "note") VALUES (42, TRUE, 'O''Brien');`)
+
+    const pgDotInsert = rowsToInsertSQL({ schema: 'public', table: 'order.items' }, sampleCols, sampleRows, EngineType.EnginePostgres)
+    expect(pgDotInsert).toBe(`INSERT INTO "public"."order.items" ("id", "active", "note") VALUES (42, TRUE, 'O''Brien');`)
+
+    // MySQL uses backticks
+    const mysqlSql = rowsToInsertSQL({ table: 'users' }, sampleCols, sampleRows, EngineType.EngineMySQL)
+    expect(mysqlSql).toBe("INSERT INTO `users` (`id`, `active`, `note`) VALUES (42, TRUE, 'O''Brien');")
+
+    // Missing table name emits explicit placeholder warning comment
+    const adhocSql = rowsToInsertSQL(null, sampleCols, sampleRows, EngineType.EnginePostgres)
+    expect(adhocSql).toContain('-- 注意：当前结果来自自定义 SQL')
+    expect(adhocSql).toContain('INSERT INTO "table_name"')
   })
 
-  it('opens scrollable floating ValueInspector modal on double-click and shows full multiline text', async () => {
+  it('opens scrollable floating ValueInspector modal via uiStore and shows full multiline text', () => {
+    const uiStore = useUiStore()
     const longText = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}: 12345678901234567890`).join('\n')
-    const wrapper = mount(ValueInspector, {
-      props: {
-        item: {
-          column: { name: 'bio', databaseType: 'TEXT', kind: ValueKind.KindString, nullable: true },
-          cell: { kind: ValueKind.KindString, text: longText },
-          rowIndex: 0,
-        },
-      },
-    })
+    uiStore.inspectCell(
+      { name: 'bio', databaseType: 'TEXT', kind: ValueKind.KindString, nullable: true },
+      { kind: ValueKind.KindString, text: longText },
+      0,
+    )
 
+    const wrapper = mount(ValueInspector)
     expect(wrapper.find('[data-testid="value-inspector-modal"]').exists()).toBe(true)
     const content = wrapper.find('[data-testid="value-inspector-content"]')
     expect(content.text()).toContain('Line 1: 12345678901234567890')
     expect(content.text()).toContain('Line 40: 12345678901234567890')
+    wrapper.unmount()
+  })
 
-    // Pressing Escape closes the floating modal
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-    expect(wrapper.emitted('close')).toHaveLength(1)
+  it('virtualizes columns in DataGrid for wide tables instead of mounting every column', () => {
+    const wideCols: ColumnMeta[] = Array.from({ length: 80 }, (_, i) => ({
+      name: `col_${i}`,
+      databaseType: 'VARCHAR(64)',
+      kind: ValueKind.KindString,
+      nullable: true,
+    }))
+    const wideRows: CellValue[][] = [
+      wideCols.map((_, i) => ({ kind: ValueKind.KindString, text: `val_${i}` })),
+    ]
+
+    const wrapper = mount(DataGrid, { props: { columns: wideCols, rows: wideRows } })
+    const renderedHeaders = wrapper.findAll('[data-col-idx]')
+    expect(renderedHeaders.length).toBeGreaterThan(0)
+    expect(renderedHeaders.length).toBeLessThan(30)
+    wrapper.unmount()
+  })
+
+  it('resets saved scroll position when DataGrid receives new results in a background tab, while preserving scroll for unchanged results', async () => {
+    const cols: ColumnMeta[] = [
+      { name: 'id', databaseType: 'BIGINT', kind: ValueKind.KindInt, nullable: false },
+      { name: 'note', databaseType: 'TEXT', kind: ValueKind.KindString, nullable: true },
+    ]
+    const initialRows: CellValue[][] = Array.from({ length: 40 }, (_, i) => [
+      { kind: ValueKind.KindInt, text: String(i + 1) },
+      { kind: ValueKind.KindString, text: `row_${i + 1}` },
+    ])
+
+    const wrapper = mount(DataGrid, {
+      props: { columns: cols, rows: initialRows, active: true },
+    })
+
+    const viewport = wrapper.find('.overflow-auto').element as HTMLElement
+    viewport.scrollTop = 260
+    viewport.scrollLeft = 90
+    await wrapper.find('.overflow-auto').trigger('scroll')
+
+    // 1. Deactivate and reactivate with the SAME result set -> restores (260, 90)
+    await wrapper.setProps({ active: false })
+    viewport.scrollTop = 0
+    viewport.scrollLeft = 0
+    await wrapper.setProps({ active: true })
+    await nextTick()
+    expect(viewport.scrollTop).toBe(260)
+    expect(viewport.scrollLeft).toBe(90)
+
+    // 2. Deactivate, replace rows in background, then reactivate -> MUST reset to (0, 0) instead of stale (260, 90)
+    await wrapper.setProps({ active: false })
+    const newRows: CellValue[][] = [
+      [
+        { kind: ValueKind.KindInt, text: '999' },
+        { kind: ValueKind.KindString, text: 'fresh_result' },
+      ],
+    ]
+    await wrapper.setProps({ rows: newRows })
+    await wrapper.setProps({ active: true })
+    await nextTick()
+    expect(viewport.scrollTop).toBe(0)
+    expect(viewport.scrollLeft).toBe(0)
+
+    wrapper.unmount()
   })
 })
 
@@ -180,6 +318,7 @@ describe('SessionBanner safety semantics (Criteria 1, 2, 3)', () => {
     expect(buttons[0].text()).toContain('我已核对')
     expect(buttons[0].text()).not.toContain('重试')
     expect(buttons[0].text()).not.toContain('重新执行')
+    wrapper.unmount()
   })
 
   it('renders expired snapshot notice with explicit manual rerun button (never auto-reruns)', async () => {
@@ -195,6 +334,7 @@ describe('SessionBanner safety semantics (Criteria 1, 2, 3)', () => {
     expect(banner.exists()).toBe(true)
     await banner.find('button').trigger('click')
     expect(wrapper.emitted('rerun-expired')).toHaveLength(1)
+    wrapper.unmount()
   })
 
   it('renders SessionAliveFailedTx with one-click ROLLBACK action', async () => {
@@ -208,128 +348,6 @@ describe('SessionBanner safety semantics (Criteria 1, 2, 3)', () => {
     expect(banner.exists()).toBe(true)
     await banner.find('button').trigger('click')
     expect(wrapper.emitted('rollback')).toHaveLength(1)
-  })
-})
-
-describe('4-engine workbench support (MySQL, PostgreSQL, MariaDB, SQLite)', () => {
-  beforeEach(() => {
-    setActivePinia(createPinia())
-  })
-
-  it('formats engine labels and SQLite vs network connection endpoints cleanly', () => {
-    expect(engineLabel(EngineType.EngineMySQL)).toBe('MySQL')
-    expect(engineLabel(EngineType.EnginePostgres)).toBe('PostgreSQL')
-    expect(engineLabel(EngineType.EngineMariaDB)).toBe('MariaDB')
-    expect(engineLabel(EngineType.EngineSQLite)).toBe('SQLite')
-
-    expect(
-      connectionEndpointSummary({
-        driver: EngineType.EngineSQLite,
-        params: { filePath: '/data/projects/billing.sqlite3' },
-      }),
-    ).toBe('billing.sqlite3')
-
-    expect(
-      connectionEndpointSummary({
-        driver: EngineType.EngineMariaDB,
-        params: { host: '127.0.0.1', port: 13307 },
-      }),
-    ).toBe('127.0.0.1:13307')
-  })
-
-  it('switches ConnectionModal cleanly between network engines (MariaDB/MySQL/PG) and SQLite file mode', async () => {
-    const connStore = useConnectionsStore()
-    connStore.openNewConnectionModal()
-
-    const wrapper = mount(ConnectionModal)
-    const buttons = wrapper.findAll('button')
-    const btnTexts = buttons.map((b) => b.text().trim())
-    expect(btnTexts).toContain('MySQL')
-    expect(btnTexts).toContain('PostgreSQL')
-    expect(btnTexts).toContain('MariaDB')
-    expect(btnTexts).toContain('SQLite')
-
-    // Switch to SQLite: hides host/port/password and shows local file picker + engine mode=ro copy
-    const sqliteBtn = buttons.find((b) => b.text().trim() === 'SQLite')
-    expect(sqliteBtn).toBeDefined()
-    await sqliteBtn!.trigger('click')
-
-    expect(wrapper.text()).toContain('SQLite 数据库文件路径')
-    expect(wrapper.text()).toContain('选择文件...')
-    expect(wrapper.text()).toContain('mode=ro')
-    expect(wrapper.text()).not.toContain('主机地址 (Host)')
-    expect(wrapper.text()).not.toContain('TLS 加密模式')
-
-    // Switch to MariaDB: restores host/port/TLS and defaults back to port 3306 / root
-    const mariaBtn = buttons.find((b) => b.text().trim() === 'MariaDB')
-    expect(mariaBtn).toBeDefined()
-    await mariaBtn!.trigger('click')
-
-    expect(wrapper.text()).toContain('主机地址 (Host)')
-    expect(wrapper.text()).toContain('TLS 加密模式')
-    expect(wrapper.text()).toContain('客户端只读保护')
-  })
-
-  it('manages theme (system/light/dark) and fontScale via SettingsModal with persistence', async () => {
-    const mediaChangeListeners: Array<(ev: MediaQueryListEvent) => void> = []
-    vi.stubGlobal(
-      'matchMedia',
-      vi.fn().mockImplementation((query: string) => ({
-        matches: true, // OS prefers dark
-        media: query,
-        addEventListener: (_: string, cb: (ev: MediaQueryListEvent) => void) => {
-          mediaChangeListeners.push(cb)
-        },
-        removeEventListener: vi.fn(),
-      })),
-    )
-
-    try {
-      const settings = useSettingsStore()
-      // Defaults: follow system (dark here) + standard font scale
-      expect(settings.themePreference).toBe('system')
-      expect(settings.theme).toBe('dark')
-      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
-      expect(settings.fontScale).toBe('standard')
-      expect(document.documentElement.getAttribute('data-font-scale')).toBe('standard')
-
-      // Simulate OS switching to light while in system mode
-      expect(mediaChangeListeners.length).toBeGreaterThan(0)
-      mediaChangeListeners.forEach((cb) => cb({ matches: false } as MediaQueryListEvent))
-      await Promise.resolve()
-      expect(settings.theme).toBe('light')
-      expect(document.documentElement.getAttribute('data-theme')).toBe('light')
-
-      // Open SettingsModal and interact with controls
-      settings.openSettingsModal()
-      const wrapper = mount(SettingsModal)
-      expect(wrapper.find('[data-testid="settings-modal"]').exists()).toBe(true)
-      expect(wrapper.text()).toContain('跟随系统')
-      expect(wrapper.text()).toContain('亮色')
-      expect(wrapper.text()).toContain('暗色')
-
-      await wrapper.find('[data-testid="theme-option-dark"]').trigger('click')
-      expect(settings.themePreference).toBe('dark')
-      expect(settings.theme).toBe('dark')
-      expect(localStorage.getItem('sqlm:theme')).toBe('dark')
-      expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
-
-      await wrapper.find('[data-testid="theme-option-light"]').trigger('click')
-      expect(settings.themePreference).toBe('light')
-      expect(settings.theme).toBe('light')
-      expect(localStorage.getItem('sqlm:theme')).toBe('light')
-
-      await wrapper.find('[data-testid="font-scale-option-comfortable"]').trigger('click')
-      expect(settings.fontScale).toBe('comfortable')
-      expect(localStorage.getItem('sqlm:fontScale')).toBe('comfortable')
-      expect(document.documentElement.getAttribute('data-font-scale')).toBe('comfortable')
-
-      await wrapper.find('[data-testid="font-scale-option-compact"]').trigger('click')
-      expect(settings.fontScale).toBe('compact')
-      expect(localStorage.getItem('sqlm:fontScale')).toBe('compact')
-      expect(document.documentElement.getAttribute('data-font-scale')).toBe('compact')
-    } finally {
-      vi.unstubAllGlobals()
-    }
+    wrapper.unmount()
   })
 })

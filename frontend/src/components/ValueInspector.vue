@@ -1,21 +1,18 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { Braces, Copy, Download, Pilcrow, X } from 'lucide-vue-next'
-import { api, ValueKind } from '@/api/client'
+import { computed, ref, watch } from 'vue'
+import { Braces, Copy, Download, Pilcrow } from 'lucide-vue-next'
+import { streamUrl, ValueKind } from '@/api/types'
 import { useSettingsStore } from '@/stores/settings'
-import type { InspectedCell } from '@/stores/workspace'
-import { formatBytes, formatHexDump, isEmptyStringCell, tokenizeWhitespace } from '@/utils/format'
-
-const props = defineProps<{
-  item: InspectedCell | null
-}>()
-
-const emit = defineEmits<{
-  (e: 'close'): void
-  (e: 'copied', label: string): void
-}>()
+import { useUiStore } from '@/stores/ui'
+import { copyToClipboard } from '@/utils/clipboard'
+import { formatBytes, formatHexDump, isEmptyStringCell } from '@/utils/format'
+import BaseModal from './BaseModal.vue'
+import CellText from './CellText.vue'
 
 const settings = useSettingsStore()
+const uiStore = useUiStore()
+
+const item = computed(() => uiStore.inspectedCell)
 
 const streamLoading = ref(false)
 const streamError = ref('')
@@ -25,7 +22,7 @@ const binaryBytesLen = ref(0)
 const prettyJson = ref(true)
 
 watch(
-  () => props.item,
+  item,
   async (val) => {
     streamError.value = ''
     fullText.value = ''
@@ -38,7 +35,7 @@ watch(
     if (cell.streamRef) {
       streamLoading.value = true
       try {
-        const res = await fetch(api.streamUrl(cell.streamRef))
+        const res = await fetch(streamUrl(cell.streamRef))
         if (!res.ok) {
           streamError.value = `按需读取大对象失败 (HTTP ${res.status})，可能已随快照释放`
           return
@@ -61,8 +58,8 @@ watch(
 )
 
 const rawText = computed(() => {
-  if (!props.item) return ''
-  const { cell } = props.item
+  if (!item.value) return ''
+  const { cell } = item.value
   if (cell.kind === ValueKind.KindNull) return 'NULL'
   if (cell.kind === ValueKind.KindBinary) {
     return binaryHex.value || cell.text || ''
@@ -71,8 +68,8 @@ const rawText = computed(() => {
 })
 
 const displayContent = computed(() => {
-  if (!props.item) return ''
-  const { cell } = props.item
+  if (!item.value) return ''
+  const { cell } = item.value
   if (cell.kind === ValueKind.KindJSON && prettyJson.value) {
     try {
       return JSON.stringify(JSON.parse(rawText.value), null, 2)
@@ -84,8 +81,8 @@ const displayContent = computed(() => {
 })
 
 const lengthSummary = computed(() => {
-  if (!props.item) return ''
-  const { cell } = props.item
+  if (!item.value) return ''
+  const { cell } = item.value
   if (cell.kind === ValueKind.KindNull) return 'NULL'
   if (cell.kind === ValueKind.KindBinary) {
     return formatBytes(binaryBytesLen.value || cell.byteLength)
@@ -95,86 +92,54 @@ const lengthSummary = computed(() => {
   return bytes !== len ? `${len} 字符 · ${formatBytes(bytes)}` : `${len} 字符`
 })
 
+const modalSubtitle = computed(() => {
+  if (!item.value) return ''
+  const col = item.value.column
+  return `第 ${item.value.rowIndex + 1} 行 · ${col.databaseType || col.kind} · ${lengthSummary.value}`
+})
+
 async function copyContent() {
-  if (!props.item) return
-  try {
-    // Strictly copies raw / formatted value without whitespace visualization glyphs!
-    await navigator.clipboard.writeText(displayContent.value)
-    emit('copied', '已复制完整原文')
-  } catch {
-    const el = document.createElement('textarea')
-    el.value = displayContent.value
-    document.body.appendChild(el)
-    el.select()
-    document.execCommand('copy')
-    document.body.removeChild(el)
-    emit('copied', '已复制完整原文')
+  if (!item.value) return
+  // Strictly copies raw / formatted value without whitespace visualization glyphs!
+  if (await copyToClipboard(displayContent.value)) {
+    const isPreviewOnly = Boolean(item.value.cell.truncated && !fullText.value)
+    uiStore.notify(
+      isPreviewOnly ? 'warning' : 'success',
+      isPreviewOnly ? '已复制预览文本（后端截断）' : '已复制完整原文',
+    )
   }
 }
-
-function onKeydown(ev: KeyboardEvent) {
-  if (ev.key === 'Escape' && props.item) {
-    ev.preventDefault()
-    ev.stopPropagation()
-    emit('close')
-  }
-}
-
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <template>
-  <div
-    v-if="item"
-    data-testid="value-inspector-modal"
-    class="fixed inset-0 z-50 flex items-center justify-center p-6"
-    style="background: rgba(15, 23, 42, 0.42); backdrop-filter: blur(2px)"
-    @click.self="emit('close')"
+  <BaseModal
+    :open="Boolean(item)"
+    :title="item?.column.name ?? ''"
+    :subtitle="modalSubtitle"
+    max-width-class="max-w-2xl"
+    max-height-class="max-h-[78vh]"
+    test-id="value-inspector-modal"
+    @close="uiStore.closeInspector()"
   >
-    <div
-      class="w-full max-w-2xl max-h-[78vh] rounded-xl border shadow-2xl flex flex-col overflow-hidden"
-      style="background: var(--bg-elevated); border-color: var(--border-strong)"
-    >
-      <!-- Header -->
+    <template #toolbar>
       <div
-        class="px-4 py-3 border-b flex items-center justify-between gap-3 shrink-0"
-        style="border-color: var(--border-subtle)"
+        v-if="item"
+        class="px-4 py-2 border-b border-border bg-surface flex flex-wrap items-center justify-between gap-2 text-xs shrink-0"
       >
-        <div class="min-w-0">
-          <div class="font-semibold text-sm truncate" style="color: var(--text-primary)">
-            {{ item.column.name }}
-          </div>
-          <div class="text-[11px] font-mono-tabular truncate" style="color: var(--text-muted)">
-            第 {{ item.rowIndex + 1 }} 行 · {{ item.column.databaseType || item.column.kind }} · {{ lengthSummary }}
-          </div>
-        </div>
-        <button
-          type="button"
-          class="btn btn-ghost !w-7 !h-7 !p-0 shrink-0"
-          title="关闭浮窗 (Esc)"
-          @click="emit('close')"
-        >
-          <X class="w-4 h-4" />
-        </button>
-      </div>
-
-      <!-- Toolbar -->
-      <div
-        class="px-4 py-2 border-b flex flex-wrap items-center justify-between gap-2 text-xs shrink-0"
-        style="background: var(--bg-surface); border-color: var(--border-subtle)"
-      >
-        <div class="flex items-center gap-1.5 text-[11px]" style="color: var(--text-muted)">
+        <div class="flex items-center gap-1.5 text-[11px] text-ink-muted">
           <span>只读预览</span>
           <span v-if="isEmptyStringCell(item.cell)">· 空字符串（长度 0，非 NULL）</span>
+          <span v-else-if="item.cell.truncated && !fullText" class="text-warning">
+            · 当前仅展示截断预览{{ item.cell.streamRef ? '' : '（无流式原文句柄）' }}
+          </span>
         </div>
 
         <div class="flex items-center gap-1.5">
           <button
             v-if="item.cell.kind === ValueKind.KindJSON"
             type="button"
-            class="btn !h-6 !px-2 !text-[11px]"
-            :class="prettyJson ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]' : ''"
+            class="btn btn-xs"
+            :class="prettyJson ? 'btn-active' : ''"
             @click="prettyJson = !prettyJson"
           >
             <Braces class="w-3 h-3" />
@@ -184,12 +149,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <button
             v-if="item.cell.kind !== ValueKind.KindNull && item.cell.kind !== ValueKind.KindBinary"
             type="button"
-            class="btn !h-6 !px-2 !text-[11px]"
-            :class="
-              settings.showWhitespace
-                ? '!border-[var(--accent)] !bg-[var(--accent-soft)] !text-[var(--accent-text)]'
-                : ''
-            "
+            class="btn btn-xs"
+            :class="settings.showWhitespace ? 'btn-active' : ''"
             title="显示/隐藏空格、制表符、换行与零宽字符"
             @click="settings.toggleWhitespace()"
           >
@@ -197,67 +158,58 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
             空白符
           </button>
 
-          <button type="button" class="btn !h-6 !px-2 !text-[11px]" @click="copyContent">
+          <button type="button" class="btn btn-xs" @click="copyContent">
             <Copy class="w-3 h-3" />
             复制原文
           </button>
 
           <a
             v-if="item.cell.streamRef"
-            :href="api.streamUrl(item.cell.streamRef, true)"
+            :href="streamUrl(item.cell.streamRef, true)"
             download
-            class="btn !h-6 !px-2 !text-[11px] no-underline"
+            class="btn btn-xs no-underline"
           >
             <Download class="w-3 h-3" />
             下载
           </a>
         </div>
       </div>
+    </template>
 
-      <!-- Scrollable Full-Value Body -->
-      <div class="flex-1 min-h-0 overflow-y-auto p-4" style="background: var(--bg-canvas)">
-        <div v-if="streamLoading" class="text-xs py-10 text-center" style="color: var(--text-muted)">
-          正在通过 /stream 按需加载完整数据...
-        </div>
-
-        <div
-          v-else-if="streamError"
-          class="rounded-md p-3 text-xs"
-          style="background: var(--danger-soft); color: var(--danger)"
-        >
-          {{ streamError }}
-        </div>
-
-        <div
-          v-else-if="item.cell.kind === ValueKind.KindNull"
-          class="py-8 text-center italic font-mono-tabular text-sm"
-          style="color: var(--text-faint)"
-        >
-          NULL
-        </div>
-
-        <div
-          v-else-if="isEmptyStringCell(item.cell)"
-          class="py-8 text-center font-mono-tabular text-xs"
-          style="color: var(--text-faint)"
-        >
-          ""（空字符串，长度为 0，与 NULL 不同）
-        </div>
-
-        <pre
-          v-else
-          data-testid="value-inspector-content"
-          class="m-0 font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed"
-          style="color: var(--text-primary); font-size: var(--editor-font-size)"
-        ><template v-if="settings.showWhitespace && item.cell.kind !== ValueKind.KindBinary"><template
-            v-for="(tok, tIdx) in tokenizeWhitespace(displayContent, true)"
-            :key="tIdx"
-          ><span
-            v-if="tok.kind !== 'text'"
-            :data-ws-token="tok.kind"
-            :style="{ color: tok.kind === 'special' ? 'var(--warning)' : 'var(--text-faint)' }"
-          >{{ tok.text }}</span><template v-else>{{ tok.text }}</template><template v-if="tok.lineBreakAfter">{{ '\n' }}</template></template></template><template v-else>{{ displayContent }}</template></pre>
+    <!-- Scrollable Full-Value Body -->
+    <div v-if="item" class="flex-1 min-h-0 overflow-y-auto p-4 bg-canvas">
+      <div v-if="streamLoading" class="text-xs py-10 text-center text-ink-muted">
+        正在通过 /stream 按需加载完整数据...
       </div>
+
+      <div v-else-if="streamError" class="rounded-md p-3 text-xs bg-danger-soft text-danger">
+        {{ streamError }}
+      </div>
+
+      <div v-else-if="item.cell.kind === ValueKind.KindNull" class="py-8 text-center text-sm">
+        <CellText :cell="item.cell" />
+      </div>
+
+      <div
+        v-else-if="isEmptyStringCell(item.cell)"
+        class="py-8 text-center font-mono-tabular text-xs text-ink-faint"
+      >
+        ""（空字符串，长度为 0，与 NULL 不同）
+      </div>
+
+      <pre
+        v-else
+        data-testid="value-inspector-content"
+        class="m-0 font-mono-tabular whitespace-pre-wrap break-all select-text leading-relaxed text-ink"
+        style="font-size: var(--editor-font-size)"
+      ><CellText
+        :cell="item.cell"
+        :override-text="displayContent"
+        :show-whitespace="settings.showWhitespace"
+        :preserve-line-breaks="true"
+        :hide-binary-prefix="true"
+        :single-line="false"
+      /></pre>
     </div>
-  </div>
+  </BaseModal>
 </template>

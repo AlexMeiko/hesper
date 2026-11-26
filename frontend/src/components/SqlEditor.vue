@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, highlightActiveLine, highlightActiveLineGutter, keymap, lineNumbers, placeholder } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -8,16 +8,22 @@ import { bracketMatching, defaultHighlightStyle, HighlightStyle, syntaxHighlight
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { MariaSQL, MySQL, PostgreSQL, SQLite, sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { tags } from '@lezer/highlight'
-import { EngineType, type CompletionCatalog } from '@/api/client'
+import { EngineType, type CompletionCatalog } from '@/api/types'
 import type { ThemeMode } from '@/stores/settings'
 
-const props = defineProps<{
-  modelValue: string
-  dialect: EngineType
-  catalog?: CompletionCatalog | null
-  theme: ThemeMode
-  readOnly?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    modelValue: string
+    dialect: EngineType
+    catalog?: CompletionCatalog | null
+    theme: ThemeMode
+    active?: boolean
+  }>(),
+  {
+    catalog: null,
+    active: true,
+  },
+)
 
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
@@ -27,8 +33,21 @@ const emit = defineEmits<{
 
 const containerRef = ref<HTMLElement | null>(null)
 let view: EditorView | null = null
+let removeScrollListener: (() => void) | null = null
+let savedScrollTop = 0
+let savedScrollLeft = 0
+const utf8Encoder = new TextEncoder()
 const languageCompartment = new Compartment()
 const themeCompartment = new Compartment()
+
+/**
+ * Converts a JS/CodeMirror UTF-16 code-unit offset into a UTF-8 byte offset
+ * matching Go's sqlsplit.StatementAtCursor byte coordinates (fixes CJK offset drift).
+ */
+function utf8ByteOffset(doc: string, utf16Offset: number): number {
+  if (utf16Offset <= 0) return 0
+  return utf8Encoder.encode(doc.slice(0, utf16Offset)).length
+}
 
 const darkHighlight = HighlightStyle.define([
   { tag: tags.keyword, color: '#60a5fa', fontWeight: '600' },
@@ -86,18 +105,6 @@ function buildThemeExtension() {
   ]
 }
 
-function triggerRunCurrent() {
-  if (!view) return false
-  const sel = view.state.selection.main
-  if (sel.from !== sel.to) {
-    const selectedText = view.state.sliceDoc(sel.from, sel.to)
-    emit('run-current', { sqlOverride: selectedText, runMode: 'selection', cursorOffset: 0 })
-  } else {
-    emit('run-current', { runMode: 'current', cursorOffset: sel.head })
-  }
-  return true
-}
-
 function getExecutionContext(): { sqlOverride?: string; runMode: 'current' | 'selection'; cursorOffset: number } {
   if (!view) return { runMode: 'current', cursorOffset: 0 }
   const sel = view.state.selection.main
@@ -108,7 +115,16 @@ function getExecutionContext(): { sqlOverride?: string; runMode: 'current' | 'se
       cursorOffset: 0,
     }
   }
-  return { runMode: 'current', cursorOffset: sel.head }
+  return {
+    runMode: 'current',
+    cursorOffset: utf8ByteOffset(view.state.doc.toString(), sel.head),
+  }
+}
+
+function triggerRunCurrent() {
+  if (!view) return false
+  emit('run-current', getExecutionContext())
+  return true
 }
 
 defineExpose({ getExecutionContext })
@@ -158,7 +174,30 @@ onMounted(() => {
     state,
     parent: containerRef.value,
   })
+
+  const scroller = view.scrollDOM
+  const onScroll = () => {
+    if (props.active) {
+      savedScrollTop = scroller.scrollTop
+      savedScrollLeft = scroller.scrollLeft
+    }
+  }
+  scroller.addEventListener('scroll', onScroll, { passive: true })
+  removeScrollListener = () => scroller.removeEventListener('scroll', onScroll)
 })
+
+watch(
+  () => props.active,
+  async (isActive, wasActive) => {
+    if (isActive && !wasActive && view) {
+      await nextTick()
+      if (!view) return
+      view.scrollDOM.scrollTop = savedScrollTop
+      view.scrollDOM.scrollLeft = savedScrollLeft
+      view.requestMeasure()
+    }
+  },
+)
 
 watch(
   () => props.modelValue,
@@ -194,6 +233,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  removeScrollListener?.()
+  removeScrollListener = null
   view?.destroy()
   view = null
 })

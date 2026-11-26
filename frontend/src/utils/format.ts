@@ -1,4 +1,5 @@
-import { ValueKind, type CellValue, type ColumnMeta } from '@/api/client'
+import { EngineType, ValueKind, type CellValue, type ColumnMeta } from '@/api/types'
+import { defaultPortForEngine, quoteIdent, quoteTableTarget, type TableTarget } from './tableMeta'
 
 export function formatBytes(bytes?: number): string {
   if (bytes == null || bytes < 0) return '0 B'
@@ -174,6 +175,75 @@ export function tokenizeWhitespace(text: string, preserveLineBreaks = false): Wh
   return tokens
 }
 
+export interface ExportFidelitySummary {
+  truncatedCount: number
+  binaryPreviewCount: number
+  hasNullAndEmpty: boolean
+  hasTsvNormalizedWhitespace: boolean
+}
+
+/**
+ * Inspects exported cells so the UI can honestly report any preview/format loss
+ * (e.g. backend-truncated text, BLOB hex previews, or TSV tab/newline flattening).
+ */
+export function inspectExportFidelity(
+  columns: ColumnMeta[],
+  rows: (CellValue[] | null)[],
+): ExportFidelitySummary {
+  let truncatedCount = 0
+  let binaryPreviewCount = 0
+  let sawNull = false
+  let sawEmpty = false
+  let hasTsvNormalizedWhitespace = false
+
+  for (const row of rows) {
+    for (let i = 0; i < columns.length; i++) {
+      const cell = row?.[i]
+      if (!cell || cell.kind === ValueKind.KindNull) {
+        sawNull = true
+        continue
+      }
+      if (cell.kind === ValueKind.KindBinary) {
+        binaryPreviewCount++
+      } else if (cell.truncated) {
+        truncatedCount++
+      }
+      if (isEmptyStringCell(cell)) {
+        sawEmpty = true
+      } else if (cell.text && /[\t\r\n]/.test(cell.text)) {
+        hasTsvNormalizedWhitespace = true
+      }
+    }
+  }
+
+  return {
+    truncatedCount,
+    binaryPreviewCount,
+    hasNullAndEmpty: sawNull && sawEmpty,
+    hasTsvNormalizedWhitespace,
+  }
+}
+
+export function formatExportCaveat(
+  summary: ExportFidelitySummary,
+  format: 'raw' | 'tsv' | 'csv' | 'json' | 'sql',
+): string | undefined {
+  const notes: string[] = []
+  if (summary.truncatedCount > 0) {
+    notes.push(`含 ${summary.truncatedCount} 格超长文本预览（已截断，完整原文请双击单元格查看/下载）`)
+  }
+  if (summary.binaryPreviewCount > 0) {
+    notes.push(`含 ${summary.binaryPreviewCount} 格 BLOB 十六进制预览（非原始二进制，完整字节请双击下载）`)
+  }
+  if (format === 'tsv' && summary.hasTsvNormalizedWhitespace) {
+    notes.push('TSV 已将单元格内制表符/换行转为空格以适配表格粘贴')
+  }
+  if ((format === 'tsv' || format === 'csv') && summary.hasNullAndEmpty) {
+    notes.push(`${format.toUpperCase()} 格式中 NULL 与空串均导出为空`)
+  }
+  return notes.length > 0 ? notes.join('；') : undefined
+}
+
 export function rowsToTSV(columns: ColumnMeta[], rows: (CellValue[] | null)[]): string {
   const header = columns.map((c) => c.name).join('\t')
   const lines = rows.map((row) =>
@@ -222,21 +292,42 @@ export function rowsToJSON(columns: ColumnMeta[], rows: (CellValue[] | null)[]):
   return JSON.stringify(objs, null, 2)
 }
 
-export function rowsToInsertSQL(tableName: string, columns: ColumnMeta[], rows: (CellValue[] | null)[]): string {
-  const tbl = tableName || 'table_name'
-  const colList = columns.map((c) => `\`${c.name}\``).join(', ')
-  return rows
-    .map((row) => {
-      const vals = columns.map((_, i) => {
-        const cell = row?.[i]
-        if (!cell || cell.kind === ValueKind.KindNull) return 'NULL'
-        if (isNumericKind(cell.kind) && cell.text) return cell.text
-        const escaped = (cell.text ?? '').replace(/'/g, "''")
-        return `'${escaped}'`
-      })
-      return `INSERT INTO ${tbl} (${colList}) VALUES (${vals.join(', ')});`
+/**
+ * Generates dialect-aware INSERT SQL statements:
+ * - Quotes table & column identifiers using `"` for PostgreSQL/SQLite and `` ` `` for MySQL/MariaDB.
+ * - Formats NULL, numeric literals, booleans, and escaped strings faithfully.
+ * - Adds a clear placeholder notice when no target table name is known (e.g. arbitrary SQL query result).
+ */
+export function rowsToInsertSQL(
+  target: TableTarget | null | undefined,
+  columns: ColumnMeta[],
+  rows: (CellValue[] | null)[],
+  dialect?: EngineType,
+): string {
+  const hasRealTable = Boolean(target?.table)
+  const tbl = quoteTableTarget(hasRealTable ? target : { table: 'table_name' }, dialect)
+  const colList = columns.map((c) => quoteIdent(c.name, dialect)).join(', ')
+
+  const lines = rows.map((row) => {
+    const vals = columns.map((_, i) => {
+      const cell = row?.[i]
+      if (!cell || cell.kind === ValueKind.KindNull) return 'NULL'
+      if (isNumericKind(cell.kind) && cell.text) return cell.text
+      if (cell.kind === ValueKind.KindBool && cell.text) {
+        const lower = cell.text.toLowerCase()
+        if (lower === 'true' || lower === 't' || lower === '1') return 'TRUE'
+        if (lower === 'false' || lower === 'f' || lower === '0') return 'FALSE'
+      }
+      const escaped = (cell.text ?? '').replace(/'/g, "''")
+      return `'${escaped}'`
     })
-    .join('\n')
+    return `INSERT INTO ${tbl} (${colList}) VALUES (${vals.join(', ')});`
+  })
+
+  if (!hasRealTable) {
+    return `-- 注意：当前结果来自自定义 SQL，未绑定表名，请将 ${tbl} 替换为目标表名\n${lines.join('\n')}`
+  }
+  return lines.join('\n')
 }
 
 export function formatHexDump(bytes: Uint8Array, maxBytes = 4096): string {
@@ -315,5 +406,7 @@ export function connectionEndpointSummary(conn: {
   if (conn.driver === 'sqlite') {
     return fileBaseName(conn.params.filePath) || conn.params.filePath || 'SQLite 文件'
   }
-  return `${conn.params.host || '127.0.0.1'}:${conn.params.port || 3306}`
+  const host = conn.params.host || '127.0.0.1'
+  const port = conn.params.port || defaultPortForEngine(conn.driver)
+  return port > 0 ? `${host}:${port}` : host
 }
