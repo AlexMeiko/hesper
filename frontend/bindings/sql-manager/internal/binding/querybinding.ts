@@ -51,8 +51,16 @@ export function OpenTabSession(tabID: string, connID: string, db: string, schema
     return $Call.ByID(1028391043, tabID, connID, db, schema);
 }
 
+export function OpenTabSessionWithSSHSecret(tabID: string, connID: string, db: string, schema: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.TabSessionInfo> {
+    return $Call.ByID(1257720587, tabID, connID, db, schema, sshSecret, saveSecret);
+}
+
 export function ReconnectTabSession(tabID: string, db: string, schema: string): $CancellablePromise<dto$0.TabSessionInfo> {
     return $Call.ByID(1592855126, tabID, db, schema);
+}
+
+export function ReconnectTabSessionWithSSHSecret(tabID: string, db: string, schema: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.TabSessionInfo> {
+    return $Call.ByID(501618980, tabID, db, schema, sshSecret, saveSecret);
 }
 
 export function SwitchTabDatabase(tabID: string, targetDB: string): $CancellablePromise<dto$0.TabSessionInfo> {

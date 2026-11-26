@@ -18,6 +18,10 @@ export function Connect(connID: string): $CancellablePromise<dto$0.ConnectResult
     return $Call.ByID(1637245882, connID);
 }
 
+export function ConnectWithSSHSecret(connID: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.ConnectResult> {
+    return $Call.ByID(1724749336, connID, sshSecret, saveSecret);
+}
+
 export function DeleteConnection(id: string): $CancellablePromise<void> {
     return $Call.ByID(292346535, id);
 }
@@ -30,6 +34,10 @@ export function ListConnections(): $CancellablePromise<dto$0.ConnectionDTO[] | n
     return $Call.ByID(760268029);
 }
 
+export function PickLocalFile(kind: string): $CancellablePromise<string> {
+    return $Call.ByID(1097209430, kind);
+}
+
 export function PickSQLiteFile(): $CancellablePromise<string> {
     return $Call.ByID(4215676539);
 }
@@ -40,4 +48,8 @@ export function SaveConnection(req: dto$0.SaveConnectionRequest): $CancellablePr
 
 export function TestConnection(req: dto$0.SaveConnectionRequest): $CancellablePromise<dto$0.TestConnectionResult> {
     return $Call.ByID(1170076376, req);
+}
+
+export function TrustSSHHostKey(hostPort: string, algorithm: string, fingerprint: string): $CancellablePromise<void> {
+    return $Call.ByID(3855298837, hostPort, algorithm, fingerprint);
 }

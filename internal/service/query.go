@@ -23,9 +23,10 @@ import (
 // QueryService orchestrates live table browsing (Track A), Execute-Once SQL execution (Track B),
 // snapshot pagination (ResultBuffer), cancel, session lifecycle, and query history.
 type QueryService struct {
-	sessMgr *session.Manager
-	resMgr  *resultbuf.Manager
-	repo    *repository.LocalDB
+	sessMgr          *session.Manager
+	resMgr           *resultbuf.Manager
+	repo             *repository.LocalDB
+	prepareSSHSecret func(ctx context.Context, connID string, carrier *runtimeSSHSecret)
 }
 
 func NewQueryService(sessMgr *session.Manager, resMgr *resultbuf.Manager, repo *repository.LocalDB) *QueryService {
@@ -36,13 +37,39 @@ func NewQueryService(sessMgr *session.Manager, resMgr *resultbuf.Manager, repo *
 	}
 }
 
+// SetSSHSecretPreparer registers ConnectionService.PrepareRuntimeSSHCredential so explicit saveSecret=true
+// submissions persist even if an existing healthy TabSession is reused without invoking ResolveConfig.
+func (s *QueryService) SetSSHSecretPreparer(fn func(ctx context.Context, connID string, carrier *runtimeSSHSecret)) {
+	s.prepareSSHSecret = fn
+}
+
 // OpenTabSession establishes a dedicated Track B physical connection for a query tab.
 func (s *QueryService) OpenTabSession(ctx context.Context, tabID, connID, db, schema string) (dto.TabSessionInfo, error) {
+	return s.openTabSessionInternal(ctx, tabID, connID, db, schema, nil)
+}
+
+// OpenTabSessionWithSSHSecret opens a query tab session with a runtime SSH password/passphrase.
+func (s *QueryService) OpenTabSessionWithSSHSecret(ctx context.Context, tabID, connID, db, schema, sshSecret string, saveSecret bool) (dto.TabSessionInfo, error) {
+	reqCtx, carrier := withRuntimeSSHSecret(ctx, sshSecret, saveSecret)
+	return s.openTabSessionInternal(reqCtx, tabID, connID, db, schema, carrier)
+}
+
+func (s *QueryService) openTabSessionInternal(ctx context.Context, tabID, connID, db, schema string, carrier *runtimeSSHSecret) (dto.TabSessionInfo, error) {
+	if s.prepareSSHSecret != nil {
+		s.prepareSSHSecret(ctx, connID, carrier)
+	}
 	ts, err := s.sessMgr.GetOrCreateTabSession(ctx, tabID, connID, db, schema)
 	if err != nil {
-		return dto.TabSessionInfo{}, wrapErr(err, dto.ErrConnectionFailed, "建立标签页独立会话失败")
+		appErr := asAppError(err, dto.ErrConnectionFailed, "建立标签页独立会话失败")
+		attachSaveOutcomeToError(appErr, carrier)
+		return dto.TabSessionInfo{}, appErr
 	}
-	return ts.Info(), nil
+	info := ts.Info()
+	if carrier != nil {
+		info.CredentialSaved = carrier.credentialSaved.Load()
+		info.SaveWarning = carrier.getSaveWarning()
+	}
+	return info, nil
 }
 
 // SwitchTabDatabase changes the target database for a query tab (in-place USE for MySQL, reconnect for PG).
@@ -71,14 +98,31 @@ func (s *QueryService) SwitchTabSchema(ctx context.Context, tabID, targetSchema 
 
 // ReconnectTabSession explicitly establishes a fresh physical connection after SessionLost or CommitOutcomeUnknown.
 func (s *QueryService) ReconnectTabSession(ctx context.Context, tabID, db, schema string) (dto.TabSessionInfo, error) {
+	return s.reconnectTabSessionInternal(ctx, tabID, db, schema, nil)
+}
+
+// ReconnectTabSessionWithSSHSecret reconnects a tab session with a runtime SSH password/passphrase.
+func (s *QueryService) ReconnectTabSessionWithSSHSecret(ctx context.Context, tabID, db, schema, sshSecret string, saveSecret bool) (dto.TabSessionInfo, error) {
+	reqCtx, carrier := withRuntimeSSHSecret(ctx, sshSecret, saveSecret)
+	return s.reconnectTabSessionInternal(reqCtx, tabID, db, schema, carrier)
+}
+
+func (s *QueryService) reconnectTabSessionInternal(ctx context.Context, tabID, db, schema string, carrier *runtimeSSHSecret) (dto.TabSessionInfo, error) {
 	ts, ok := s.sessMgr.GetTabSession(tabID)
 	if !ok {
 		return dto.TabSessionInfo{}, dto.NewAppError(dto.ErrNotFound, "标签页会话不存在", tabID)
 	}
 	if err := ts.Reconnect(ctx, db, schema); err != nil {
-		return ts.Info(), wrapErr(err, dto.ErrConnectionFailed, "重新连接失败")
+		appErr := asAppError(err, dto.ErrConnectionFailed, "重新连接失败")
+		attachSaveOutcomeToError(appErr, carrier)
+		return ts.Info(), appErr
 	}
-	return ts.Info(), nil
+	info := ts.Info()
+	if carrier != nil {
+		info.CredentialSaved = carrier.credentialSaved.Load()
+		info.SaveWarning = carrier.getSaveWarning()
+	}
+	return info, nil
 }
 
 // CloseTab releases BOTH the dedicated Track B physical connection AND all Execute-Once snapshots for tabID.
@@ -155,13 +199,20 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 	if err != nil {
 		appErr := asAppError(err, dto.ErrConnectionFailed, "无法获取标签页会话")
 		st := dto.SessionLost
+		var ep int64
 		if cur, ok := s.sessMgr.GetTabSession(req.TabID); ok {
-			st = cur.State()
+			info := cur.Info()
+			st = info.SessionState
+			ep = info.SessionEpoch
+		}
+		if appErr.SessionEpoch == 0 && ep > 0 {
+			appErr.SessionEpoch = ep
 		}
 		return &dto.ExecuteSQLResponse{
 			TabID:        req.TabID,
 			ExecID:       execID,
 			SessionState: st,
+			SessionEpoch: ep,
 			Error:        appErr,
 		}, nil
 	}
@@ -187,12 +238,14 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		stmts = allStmts
 	}
 	if len(stmts) == 0 {
+		info := ts.Info()
 		return &dto.ExecuteSQLResponse{
 			TabID:         req.TabID,
 			ExecID:        execID,
-			CurrentDB:     ts.Info().CurrentDB,
-			CurrentSchema: ts.Info().CurrentSchema,
-			SessionState:  ts.State(),
+			CurrentDB:     info.CurrentDB,
+			CurrentSchema: info.CurrentSchema,
+			SessionState:  info.SessionState,
+			SessionEpoch:  info.SessionEpoch,
 			Error:         dto.NewAppError(dto.ErrInvalidArgument, "未找到可执行的 SQL 语句", ""),
 		}, nil
 	}
@@ -214,6 +267,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 				CurrentDB:     info.CurrentDB,
 				CurrentSchema: info.CurrentSchema,
 				SessionState:  info.SessionState,
+				SessionEpoch:  info.SessionEpoch,
 				Error:         dto.NewAppError(dto.ErrInternal, "读取连接安全配置失败，已中止执行", detail),
 			}, nil
 		}
@@ -238,6 +292,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 						CurrentDB:          info.CurrentDB,
 						CurrentSchema:      info.CurrentSchema,
 						SessionState:       info.SessionState,
+						SessionEpoch:       info.SessionEpoch,
 						RequiresConfirm:    true,
 						ConfirmToken:       expectedToken,
 						HighRiskStatements: risks,
@@ -334,6 +389,7 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 	resp.CurrentDB = info.CurrentDB
 	resp.CurrentSchema = info.CurrentSchema
 	resp.SessionState = info.SessionState
+	resp.SessionEpoch = info.SessionEpoch
 	resp.ExecutedAll = req.RunMode != "selection" && resp.Error == nil && len(resp.Statements) == len(allStmts)
 	resp.TotalMs = time.Since(totalStart).Milliseconds()
 	return resp, nil

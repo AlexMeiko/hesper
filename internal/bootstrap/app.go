@@ -24,7 +24,12 @@ import (
 	"sql-manager/internal/secret"
 	"sql-manager/internal/service"
 	"sql-manager/internal/session"
+	"sql-manager/internal/tunnel"
 )
+
+func init() {
+	application.RegisterEvent[dto.SessionStateEvent]("session:state_changed")
+}
 
 // Run is the application Composition Root.
 // Wails v3 application lifecycle, dependency wiring, and window creation live strictly here.
@@ -50,13 +55,16 @@ func Run(paths config.Paths, assets fs.FS) error {
 		SpillDir: paths.ResultDir,
 	})
 
-	// 5. Pure Go application services & dedicated-connection session manager.
+	// 5. Pure Go application services, dedicated-connection session manager, and SSH tunnel pool.
 	connSvc := service.NewConnectionService(localDB, secretStore, nil, resMgr)
 	sessMgr := session.NewManager(reg, connSvc.ResolveConfig)
+	tunnelMgr := tunnel.NewManager(localDB, sessMgr.MarkConnectionLost)
 	connSvc.SetSessionManager(sessMgr)
+	connSvc.SetTunnelManager(tunnelMgr)
 
 	schemaSvc := service.NewSchemaService(sessMgr)
 	querySvc := service.NewQueryService(sessMgr, resMgr, localDB)
+	querySvc.SetSSHSecretPreparer(connSvc.PrepareRuntimeSSHCredential)
 
 	// 6. Thin Wails v3 boundary adapters.
 	connBinding := binding.NewConnectionBinding(connSvc)
@@ -98,9 +106,14 @@ func Run(paths config.Paths, assets fs.FS) error {
 		},
 		OnShutdown: func() {
 			sessMgr.CloseAll()
+			tunnelMgr.CloseAll()
 			resMgr.CloseAll()
 			_ = localDB.Close()
 		},
+	})
+
+	sessMgr.SetOnStateChanged(func(evt dto.SessionStateEvent) {
+		app.Event.Emit("session:state_changed", evt)
 	})
 
 	mainWin := app.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -121,6 +134,27 @@ func Run(paths config.Paths, assets fs.FS) error {
 			AddFilter("SQLite 数据库 (*.db, *.sqlite, *.sqlite3)", "*.db;*.sqlite;*.sqlite3;*.db3").
 			AddFilter("所有文件 (*.*)", "*").
 			PromptForSingleSelection()
+	})
+
+	binding.AttachLocalFilePicker(connBinding, func(kind string) (string, error) {
+		dlg := app.Dialog.OpenFile().AttachToWindow(mainWin)
+		switch kind {
+		case "tls_ca":
+			dlg.SetTitle("选择 TLS CA 证书文件").
+				AddFilter("证书文件 (*.pem, *.crt, *.cer)", "*.pem;*.crt;*.cer")
+		case "tls_cert":
+			dlg.SetTitle("选择客户端 TLS 证书文件").
+				AddFilter("证书文件 (*.pem, *.crt, *.cer)", "*.pem;*.crt;*.cer")
+		case "tls_key":
+			dlg.SetTitle("选择客户端 TLS 私钥文件").
+				AddFilter("私钥文件 (*.key, *.pem)", "*.key;*.pem")
+		case "ssh_key":
+			dlg.SetTitle("选择 SSH 私钥文件").
+				ShowHiddenFiles(true)
+		default:
+			dlg.SetTitle("选择文件")
+		}
+		return dlg.AddFilter("所有文件 (*.*)", "*").PromptForSingleSelection()
 	})
 
 	return app.Run()
