@@ -88,7 +88,15 @@ func (m *Manager) GetOrCreateTabSession(ctx context.Context, tabID, connID, db, 
 	m.mu.Lock()
 	ts, exists := m.tabs[tabID]
 	if exists {
+		ownerConnID := ts.connID
 		m.mu.Unlock()
+		if connID != "" && ownerConnID != connID {
+			return nil, dto.NewAppError(
+				dto.ErrInvalidArgument,
+				"标签页会话归属连接不匹配，已拒绝执行",
+				fmt.Sprintf("tab %s belongs to connection %s, got %s", tabID, ownerConnID, connID),
+			)
+		}
 		if err := ts.EnsureConnected(ctx, db, schema); err != nil {
 			return nil, err
 		}
@@ -332,6 +340,10 @@ func (ts *TabSession) Info() dto.TabSessionInfo {
 	}
 }
 
+func (ts *TabSession) ConnectionID() string {
+	return ts.connID
+}
+
 func (ts *TabSession) State() dto.SessionState {
 	ts.stateMu.Lock()
 	defer ts.stateMu.Unlock()
@@ -453,6 +465,9 @@ func (ts *TabSession) connectFresh(ctx context.Context, db, schema string) error
 		ts.currentDB = db
 	}
 	ts.currentSchema = schema
+	if ts.currentSchema == "" {
+		ts.currentSchema = fact.CurrentSchema
+	}
 	ts.serverConnID = fact.ServerConnID
 	ts.caps = caps
 	ts.dialect = fact.DetectedType
@@ -657,9 +672,8 @@ func (ts *TabSession) ExecuteStatement(
 
 	start := time.Now()
 	bound := driver.BoundStatement{SQL: stmt.Text}
-	useQuery := shouldUseQuery(stmt)
 
-	if useQuery {
+	if stmt.ReturnsRows {
 		stream, err := executor.Query(ctx, bound)
 		if err != nil {
 			appErr := ts.handleExecError(conn, err, wasInTx, mayCommitOnServer)
@@ -969,36 +983,6 @@ func (ts *TabSession) Close() error {
 		return old.Close()
 	}
 	return nil
-}
-
-func shouldUseQuery(stmt sqlsplit.Statement) bool {
-	if stmt.Kind == sqlsplit.KindQuery {
-		return true
-	}
-	// Stored procedure CALL or DML with RETURNING returns result rows!
-	if stmt.FirstWord == "CALL" {
-		return true
-	}
-	// Quick heuristic for INSERT/UPDATE/DELETE ... RETURNING
-	if stmt.Kind == sqlsplit.KindWrite {
-		upper := stmt.Text
-		if len(upper) > 9 {
-			for i := 0; i+9 <= len(upper); i++ {
-				if (upper[i] == 'R' || upper[i] == 'r') &&
-					(upper[i+1] == 'E' || upper[i+1] == 'e') &&
-					(upper[i+2] == 'T' || upper[i+2] == 't') &&
-					(upper[i+3] == 'U' || upper[i+3] == 'u') &&
-					(upper[i+4] == 'R' || upper[i+4] == 'r') &&
-					(upper[i+5] == 'N' || upper[i+5] == 'n') &&
-					(upper[i+6] == 'I' || upper[i+6] == 'i') &&
-					(upper[i+7] == 'N' || upper[i+7] == 'n') &&
-					(upper[i+8] == 'G' || upper[i+8] == 'g') {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func toSplitDialect(engine dto.EngineType) sqlsplit.Dialect {

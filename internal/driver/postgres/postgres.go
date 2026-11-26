@@ -99,10 +99,10 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 		return nil, classifyPGError(err)
 	}
 
-	var serverVer, currentDB string
+	var serverVer, currentDB, currentSchema string
 	var pid int32
-	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version'), current_database(), pg_backend_pid()").
-		Scan(&serverVer, &currentDB, &pid); err != nil {
+	if err := conn.QueryRow(ctx, "SELECT current_setting('server_version'), current_database(), pg_backend_pid(), COALESCE(current_schema(), '')").
+		Scan(&serverVer, &currentDB, &pid, &currentSchema); err != nil {
 		_ = conn.Close(ctx)
 		return nil, classifyPGError(err)
 	}
@@ -110,14 +110,15 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	connCtx, connCancel := context.WithCancel(context.Background())
 
 	return &Conn{
-		conn:       conn,
-		tracked:    tracked,
-		connCtx:    connCtx,
-		connCancel: connCancel,
-		version:    serverVer,
-		currentDB:  currentDB,
-		backendPID: pid,
-		readOnly:   cfg.ReadOnly,
+		conn:          conn,
+		tracked:       tracked,
+		connCtx:       connCtx,
+		connCancel:    connCancel,
+		version:       serverVer,
+		currentDB:     currentDB,
+		currentSchema: currentSchema,
+		backendPID:    pid,
+		readOnly:      cfg.ReadOnly,
 	}, nil
 }
 
@@ -168,16 +169,17 @@ func configureTLS(pgCfg *pgx.ConnConfig, tlsCfg dto.TLSConfig, host string) erro
 //   - Does NOT implement driver.DatabaseSwitcher (PG switches DB by reconnecting to target database).
 //   - Implements optional driver.SchemaSwitcher (SET search_path) and driver.SequenceInspector.
 type Conn struct {
-	mu         sync.Mutex
-	conn       *pgx.Conn
-	tracked    *driver.TrackedConn
-	connCtx    context.Context
-	connCancel context.CancelFunc
-	version    string
-	currentDB  string
-	backendPID int32
-	readOnly   bool
-	closed     bool
+	mu            sync.Mutex
+	conn          *pgx.Conn
+	tracked       *driver.TrackedConn
+	connCtx       context.Context
+	connCancel    context.CancelFunc
+	version       string
+	currentDB     string
+	currentSchema string
+	backendPID    int32
+	readOnly      bool
+	closed        bool
 }
 
 func (c *Conn) Ping(ctx context.Context) error {
@@ -210,6 +212,7 @@ func (c *Conn) ServerFact(_ context.Context) (driver.ServerFact, error) {
 		DetectedType:  dto.EnginePostgres,
 		ServerVersion: c.version,
 		CurrentDB:     c.currentDB,
+		CurrentSchema: c.currentSchema,
 		ServerConnID:  strconv.Itoa(int(c.backendPID)),
 	}, nil
 }
@@ -261,6 +264,9 @@ func (c *Conn) SwitchSchema(ctx context.Context, schema string) error {
 	if err != nil {
 		return classifyPGError(err)
 	}
+	c.mu.Lock()
+	c.currentSchema = schema
+	c.mu.Unlock()
 	return nil
 }
 

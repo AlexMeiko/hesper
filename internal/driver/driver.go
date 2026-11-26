@@ -38,6 +38,7 @@ type ServerFact struct {
 	DetectedType  dto.EngineType
 	ServerVersion string
 	CurrentDB     string
+	CurrentSchema string
 	ServerConnID  string
 }
 
