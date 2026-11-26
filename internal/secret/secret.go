@@ -22,10 +22,35 @@ const keyringService = "sql-manager"
 // and falls back gracefully to an AES-256-GCM encrypted local vault file when
 // running in headless or minimal Linux WM environments without D-Bus Secret Service.
 type Store struct {
-	mu        sync.Mutex
-	vaultPath string
-	keyPath   string
-	useFile   bool
+	mu                 sync.Mutex
+	vaultPath          string
+	keyPath            string
+	fileOnly           bool // true ONLY when created via NewFileOnlyStore; never touches OS keyring
+	keyringUnavailable bool // transient fallback state when OS keyring errored during Set/Get
+	keyringSet         func(service, user, pass string) error
+	keyringGet         func(service, user string) (string, error)
+	keyringDelete      func(service, user string) error
+}
+
+// IsNotFound reports whether err represents a missing credential entry (safe to treat as already deleted).
+func IsNotFound(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, keyring.ErrNotFound)
+}
+
+// PartialMutationError reports that the OS keyring was already modified before a subsequent
+// local fallback vault cleanup failed. Callers with rollback logic must treat this ref as mutated.
+type PartialMutationError struct {
+	Op  string
+	Err error
+}
+
+func (e *PartialMutationError) Error() string { return e.Err.Error() }
+func (e *PartialMutationError) Unwrap() error { return e.Err }
+
+// IsPartialMutation reports whether err indicates the OS keyring was already modified before failing.
+func IsPartialMutation(err error) bool {
+	var pm *PartialMutationError
+	return errors.As(err, &pm)
 }
 
 // NewStore creates a credential store rooted at configDir for encrypted fallback.
@@ -41,7 +66,7 @@ func NewFileOnlyStore(configDir string) *Store {
 	return &Store{
 		vaultPath: filepath.Join(configDir, "vault.enc"),
 		keyPath:   filepath.Join(configDir, ".vault.key"),
-		useFile:   true,
+		fileOnly:  true,
 	}
 }
 
@@ -49,12 +74,20 @@ func (s *Store) Set(ref, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if !s.useFile {
-		if err := keyring.Set(keyringService, ref, value); err == nil {
+	if !s.fileOnly && !s.keyringUnavailable {
+		setFn := s.keyringSet
+		if setFn == nil {
+			setFn = keyring.Set
+		}
+		if err := setFn(keyringService, ref, value); err == nil {
+			// Clear any older fallback vault copy so Get never shadows the freshly written keyring value.
+			if delErr := s.deleteFile(ref); delErr != nil {
+				return &PartialMutationError{Op: "set", Err: delErr}
+			}
 			return nil
 		}
-		// Secret Service unavailable (e.g., headless Linux / minimal WM); switch to encrypted local vault.
-		s.useFile = true
+		// Secret Service / keyring temporarily unavailable; fall back to encrypted local vault for writes.
+		s.keyringUnavailable = true
 	}
 	return s.setFile(ref, value)
 }
@@ -66,25 +99,45 @@ func (s *Store) Get(ref string) (string, error) {
 	if ref == "" {
 		return "", nil
 	}
-	if !s.useFile {
-		v, err := keyring.Get(keyringService, ref)
+
+	// Check local encrypted vault FIRST: any entry present in vault.enc is an unmigrated fallback
+	// write newer than whatever older value may still sit in the OS keyring.
+	fv, foundInFile, fileErr := s.getFileEntry(ref)
+	if fileErr != nil {
+		return "", fileErr
+	}
+	if foundInFile {
+		if !s.fileOnly && !s.keyringUnavailable {
+			// Opportunistically migrate the newer fallback value back to OS keyring, then remove
+			// the local vault copy ONLY after keyring write succeeds.
+			setFn := s.keyringSet
+			if setFn == nil {
+				setFn = keyring.Set
+			}
+			if err := setFn(keyringService, ref, fv); err == nil {
+				_ = s.deleteFile(ref)
+			} else {
+				s.keyringUnavailable = true
+			}
+		}
+		return fv, nil
+	}
+
+	if !s.fileOnly && !s.keyringUnavailable {
+		getFn := s.keyringGet
+		if getFn == nil {
+			getFn = keyring.Get
+		}
+		v, err := getFn(keyringService, ref)
 		if err == nil {
 			return v, nil
 		}
 		if errors.Is(err, keyring.ErrNotFound) {
-			// Also check fallback vault in case previously saved under fallback mode.
-			if fv, ferr := s.getFile(ref); ferr == nil {
-				return fv, nil
-			}
 			return "", nil
 		}
-		s.useFile = true
+		s.keyringUnavailable = true
 	}
-	v, err := s.getFile(ref)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
-	return v, err
+	return "", nil
 }
 
 func (s *Store) Delete(ref string) error {
@@ -94,10 +147,35 @@ func (s *Store) Delete(ref string) error {
 	if ref == "" {
 		return nil
 	}
-	if !s.useFile {
-		_ = keyring.Delete(keyringService, ref)
+	// Unless explicitly configured as fileOnly, ALWAYS attempt OS keyring deletion even if
+	// keyringUnavailable was set earlier in this session — otherwise a secret saved in a prior
+	// session could remain in the OS keyring and resurface on next startup.
+	keyringDeleted := false
+	if !s.fileOnly {
+		delFn := s.keyringDelete
+		if delFn == nil {
+			delFn = keyring.Delete
+		}
+		err := delFn(keyringService, ref)
+		if err == nil {
+			s.keyringUnavailable = false
+			keyringDeleted = true
+		} else if errors.Is(err, keyring.ErrNotFound) {
+			s.keyringUnavailable = false
+		} else {
+			s.keyringUnavailable = true
+			// Keep any newer fallback vault entry intact until keyring deletion succeeds so a
+			// stale keyring secret cannot resurface over a newer fallback secret on retry/recovery.
+			return err
+		}
 	}
-	return s.deleteFile(ref)
+	if fileErr := s.deleteFile(ref); fileErr != nil {
+		if keyringDeleted {
+			return &PartialMutationError{Op: "delete", Err: fileErr}
+		}
+		return fileErr
+	}
+	return nil
 }
 
 func (s *Store) ensureKey() ([]byte, error) {
@@ -193,18 +271,22 @@ func (s *Store) setFile(ref, val string) error {
 	return s.saveVault(m)
 }
 
-func (s *Store) getFile(ref string) (string, error) {
+func (s *Store) getFileEntry(ref string) (string, bool, error) {
 	m, err := s.loadVault()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return m[ref], nil
+	v, ok := m[ref]
+	return v, ok, nil
 }
 
 func (s *Store) deleteFile(ref string) error {
 	m, err := s.loadVault()
 	if err != nil {
 		return err
+	}
+	if _, exists := m[ref]; !exists {
+		return nil
 	}
 	delete(m, ref)
 	return s.saveVault(m)

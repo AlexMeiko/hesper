@@ -234,3 +234,8 @@ func (l *LocalDB) SetKV(ctx context.Context, key, valueJSON string) error {
 	)
 	return err
 }
+
+func (l *LocalDB) DeleteKV(ctx context.Context, key string) error {
+	_, err := l.db.ExecContext(ctx, `DELETE FROM app_kv WHERE key = ?`, key)
+	return err
+}
