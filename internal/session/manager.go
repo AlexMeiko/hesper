@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,12 @@ import (
 	"hesper/internal/driver"
 	"hesper/internal/dto"
 	"hesper/internal/sqlsplit"
+)
+
+const (
+	defaultMetaPoolConcurrency = 3
+	defaultMetaPoolMaxIdle     = 1
+	defaultMetaPoolIdleTTL     = 30 * time.Second
 )
 
 // ConfigResolver resolves decrypted ResolvedConfig for a given connectionID (and optional override database).
@@ -26,6 +33,8 @@ type Manager struct {
 	epochSeq atomic.Int64
 
 	mu                   sync.Mutex
+	metaMaxIdle          int
+	metaIdleTTL          time.Duration
 	metaPools            map[string]*metaPool   // key: connID + "\x00" + db
 	tabs                 map[string]*TabSession // key: tabID
 	invalidatedTunnelGen map[string]uint64      // highest invalidated SSH tunnel generation per connID
@@ -36,10 +45,26 @@ func NewManager(registry *driver.Registry, resolve ConfigResolver) *Manager {
 	return &Manager{
 		registry:             registry,
 		resolve:              resolve,
+		metaMaxIdle:          defaultMetaPoolMaxIdle,
+		metaIdleTTL:          defaultMetaPoolIdleTTL,
 		metaPools:            make(map[string]*metaPool),
 		tabs:                 make(map[string]*TabSession),
 		invalidatedTunnelGen: make(map[string]uint64),
 	}
+}
+
+// SetMetaPoolPolicy adjusts Track A idle connection retention (mainly for tests).
+func (m *Manager) SetMetaPoolPolicy(maxIdle int, idleTTL time.Duration) {
+	if maxIdle < 0 {
+		maxIdle = 0
+	}
+	if idleTTL < 0 {
+		idleTTL = 0
+	}
+	m.mu.Lock()
+	m.metaMaxIdle = maxIdle
+	m.metaIdleTTL = idleTTL
+	m.mu.Unlock()
 }
 
 // SetOnStateChanged registers a callback invoked outside session locks whenever a tab's
@@ -279,6 +304,61 @@ func (m *Manager) ActiveTabCount() int {
 	return len(m.tabs)
 }
 
+// CloseDatabaseMetaPool closes and removes all Track A metadata pools for connID that target targetDB
+// (including the default-DB pool if its resolved database equals targetDB).
+func (m *Manager) CloseDatabaseMetaPool(connID, targetDB string) int {
+	if connID == "" || targetDB == "" {
+		return 0
+	}
+	type poolEntry struct {
+		key  string
+		pool *metaPool
+	}
+	m.mu.Lock()
+	candidates := make([]poolEntry, 0, len(m.metaPools))
+	for k, p := range m.metaPools {
+		if p.connID == connID {
+			candidates = append(candidates, poolEntry{key: k, pool: p})
+		}
+	}
+	m.mu.Unlock()
+
+	var matched []poolEntry
+	for _, entry := range candidates {
+		if entry.pool.matchesDatabase(targetDB) {
+			matched = append(matched, entry)
+		}
+	}
+	if len(matched) == 0 {
+		return 0
+	}
+
+	var toClose []*metaPool
+	m.mu.Lock()
+	for _, entry := range matched {
+		if m.metaPools[entry.key] == entry.pool {
+			delete(m.metaPools, entry.key)
+			toClose = append(toClose, entry.pool)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, p := range toClose {
+		p.closeAll()
+	}
+	return len(toClose)
+}
+
+func matchDBName(engine dto.EngineType, a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if engine == dto.EnginePostgres {
+		return a == b
+	}
+	return strings.EqualFold(a, b)
+}
+
 func (m *Manager) getOrCreateMetaPool(_ context.Context, connID, db string) (*metaPool, error) {
 	key := connID + "\x00" + db
 	m.mu.Lock()
@@ -286,13 +366,19 @@ func (m *Manager) getOrCreateMetaPool(_ context.Context, connID, db string) (*me
 	if p, ok := m.metaPools[key]; ok {
 		return p, nil
 	}
+	maxIdle := m.metaMaxIdle
+	if maxIdle < 0 {
+		maxIdle = 0
+	}
 	p := &metaPool{
-		mgr:    m,
-		connID: connID,
-		db:     db,
-		sem:    make(chan struct{}, 3),
-		idle:   make([]pooledMetaConn, 0, 3),
-		inUse:  make(map[driver.Conn]uint64),
+		mgr:     m,
+		connID:  connID,
+		db:      db,
+		sem:     make(chan struct{}, defaultMetaPoolConcurrency),
+		maxIdle: maxIdle,
+		idleTTL: m.metaIdleTTL,
+		idle:    make([]pooledMetaConn, 0, maxIdle),
+		inUse:   make(map[driver.Conn]uint64),
 	}
 	m.metaPools[key] = p
 	return p, nil
@@ -301,20 +387,41 @@ func (m *Manager) getOrCreateMetaPool(_ context.Context, connID, db string) (*me
 // --- Track A: Small Metadata / Control Pool ---
 
 type pooledMetaConn struct {
-	conn      driver.Conn
-	tunnelGen uint64
+	conn       driver.Conn
+	tunnelGen  uint64
+	returnedAt time.Time
 }
 
 type metaPool struct {
-	mgr    *Manager
-	connID string
-	db     string
-	sem    chan struct{}
+	mgr     *Manager
+	connID  string
+	db      string
+	sem     chan struct{}
+	maxIdle int
+	idleTTL time.Duration
 
-	mu     sync.Mutex
-	idle   []pooledMetaConn
-	inUse  map[driver.Conn]uint64
-	closed bool
+	mu        sync.Mutex
+	engine    dto.EngineType
+	actualDB  string
+	idle      []pooledMetaConn
+	inUse     map[driver.Conn]uint64
+	reapTimer *time.Timer
+	closed    bool
+}
+
+func (p *metaPool) matchesDatabase(targetDB string) bool {
+	p.mu.Lock()
+	eng := p.engine
+	actual := p.actualDB
+	p.mu.Unlock()
+
+	if p.db != "" && matchDBName(eng, p.db, targetDB) {
+		return true
+	}
+	if actual != "" && matchDBName(eng, actual, targetDB) {
+		return true
+	}
+	return false
 }
 
 func (p *metaPool) acquire(ctx context.Context) (driver.Conn, uint64, error) {
@@ -333,9 +440,10 @@ func (p *metaPool) acquire(ctx context.Context) (driver.Conn, uint64, error) {
 	for len(p.idle) > 0 {
 		pc := p.idle[len(p.idle)-1]
 		p.idle = p.idle[:len(p.idle)-1]
+		expired := p.idleTTL > 0 && !pc.returnedAt.IsZero() && time.Since(pc.returnedAt) >= p.idleTTL
 		p.mu.Unlock()
 
-		if p.mgr.isTunnelGenLost(p.connID, pc.tunnelGen) {
+		if expired || p.mgr.isTunnelGenLost(p.connID, pc.tunnelGen) {
 			_ = pc.conn.Close()
 			p.mu.Lock()
 			if p.closed {
@@ -380,6 +488,11 @@ func (p *metaPool) acquire(ctx context.Context) (driver.Conn, uint64, error) {
 		return nil, 0, err
 	}
 
+	resolvedDB := cfg.Database
+	if resolvedDB == "" && cfg.Engine == dto.EnginePostgres {
+		resolvedDB = "postgres"
+	}
+
 	// Re-verify pool & tunnel generation state after OpenTransient before handing out.
 	p.mu.Lock()
 	if p.closed || p.mgr.isTunnelGenLost(p.connID, cfg.TunnelGen) {
@@ -387,6 +500,10 @@ func (p *metaPool) acquire(ctx context.Context) (driver.Conn, uint64, error) {
 		_ = c.Close()
 		<-p.sem
 		return nil, 0, dto.NewAppError(dto.ErrSessionLost, "连接建立期间隧道已失效", "")
+	}
+	p.engine = cfg.Engine
+	if resolvedDB != "" {
+		p.actualDB = resolvedDB
 	}
 	p.inUse[c] = cfg.TunnelGen
 	p.mu.Unlock()
@@ -400,13 +517,64 @@ func (p *metaPool) release(c driver.Conn, gen uint64, broken bool) {
 	}
 	p.mu.Lock()
 	delete(p.inUse, c)
-	if p.closed || broken || p.mgr.isTunnelGenLost(p.connID, gen) || len(p.idle) >= 3 {
+	if p.closed || broken || p.mgr.isTunnelGenLost(p.connID, gen) || len(p.idle) >= p.maxIdle {
 		p.mu.Unlock()
 		_ = c.Close()
 		return
 	}
-	p.idle = append(p.idle, pooledMetaConn{conn: c, tunnelGen: gen})
+	p.idle = append(p.idle, pooledMetaConn{conn: c, tunnelGen: gen, returnedAt: time.Now()})
+	p.scheduleReapLocked()
 	p.mu.Unlock()
+}
+
+// scheduleReapLocked arms an idle-eviction timer for the oldest idle connection. Caller holds p.mu.
+func (p *metaPool) scheduleReapLocked() {
+	if p.closed || p.idleTTL <= 0 || len(p.idle) == 0 {
+		return
+	}
+	oldest := p.idle[0].returnedAt
+	for _, pc := range p.idle[1:] {
+		if pc.returnedAt.Before(oldest) {
+			oldest = pc.returnedAt
+		}
+	}
+	wait := p.idleTTL - time.Since(oldest)
+	if wait < time.Millisecond {
+		wait = time.Millisecond
+	}
+	if p.reapTimer != nil {
+		p.reapTimer.Stop()
+	}
+	p.reapTimer = time.AfterFunc(wait, p.reapIdle)
+}
+
+func (p *metaPool) reapIdle() {
+	p.mu.Lock()
+	if p.closed || p.idleTTL <= 0 || len(p.idle) == 0 {
+		p.reapTimer = nil
+		p.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	var toClose []driver.Conn
+	kept := p.idle[:0]
+	for _, pc := range p.idle {
+		if now.Sub(pc.returnedAt) >= p.idleTTL {
+			toClose = append(toClose, pc.conn)
+		} else {
+			kept = append(kept, pc)
+		}
+	}
+	p.idle = kept
+	p.reapTimer = nil
+	if len(p.idle) > 0 {
+		p.scheduleReapLocked()
+	}
+	p.mu.Unlock()
+
+	for _, c := range toClose {
+		_ = c.Close()
+	}
 }
 
 func (p *metaPool) evictGeneration(lostGen uint64) {
@@ -437,6 +605,10 @@ func (p *metaPool) evictGeneration(lostGen uint64) {
 func (p *metaPool) closeAll() {
 	p.mu.Lock()
 	p.closed = true
+	if p.reapTimer != nil {
+		p.reapTimer.Stop()
+		p.reapTimer = nil
+	}
 	toClose := make([]driver.Conn, 0, len(p.idle)+len(p.inUse))
 	for _, pc := range p.idle {
 		toClose = append(toClose, pc.conn)
@@ -477,6 +649,7 @@ type TabSession struct {
 	serverConnID      string
 	caps              dto.Capabilities
 	dialect           dto.EngineType
+	pendingTxDDL      []sqlsplit.DDLAction
 	activeExecID      string
 	inFlightCancels   int
 	cancelDoneCh      chan struct{}
@@ -505,6 +678,30 @@ func (ts *TabSession) Info() dto.TabSessionInfo {
 	return ts.infoLocked()
 }
 
+// RecordPendingTxDDL buffers a structural DDL action executed inside an open transaction
+// so Explorer refreshes once COMMIT succeeds (never prematurely before commit).
+func (ts *TabSession) RecordPendingTxDDL(act sqlsplit.DDLAction) {
+	ts.stateMu.Lock()
+	ts.pendingTxDDL = append(ts.pendingTxDDL, act)
+	ts.stateMu.Unlock()
+}
+
+// DrainPendingTxDDL returns and clears buffered transactional DDL actions (called after COMMIT).
+func (ts *TabSession) DrainPendingTxDDL() []sqlsplit.DDLAction {
+	ts.stateMu.Lock()
+	out := ts.pendingTxDDL
+	ts.pendingTxDDL = nil
+	ts.stateMu.Unlock()
+	return out
+}
+
+// ClearPendingTxDDL discards buffered transactional DDL actions (called after ROLLBACK).
+func (ts *TabSession) ClearPendingTxDDL() {
+	ts.stateMu.Lock()
+	ts.pendingTxDDL = nil
+	ts.stateMu.Unlock()
+}
+
 func (ts *TabSession) snapshotState() (dto.SessionState, int64) {
 	ts.stateMu.Lock()
 	defer ts.stateMu.Unlock()
@@ -525,6 +722,7 @@ func (ts *TabSession) transitionToLostLocked(inFlightCommit bool) (driver.Conn, 
 	ts.conn = nil
 	ts.tunnelGen = 0
 	ts.activeExecID = ""
+	ts.pendingTxDDL = nil
 	ts.state = nextState
 	ts.sessionEpoch = ts.mgr.nextSessionEpoch()
 	return old, ts.state, ts.sessionEpoch
@@ -732,6 +930,7 @@ func (ts *TabSession) connectFresh(ctx context.Context, db, schema string) error
 	ts.serverConnID = fact.ServerConnID
 	ts.caps = caps
 	ts.dialect = fact.DetectedType
+	ts.pendingTxDDL = nil
 	ts.activeExecID = ""
 	ts.cancelSent = false
 	ts.cancelConfirmed = false
@@ -848,13 +1047,14 @@ func (ts *TabSession) SwitchSchema(ctx context.Context, targetSchema string) err
 
 // StatementOutcome holds the result of executing one statement inside TabSession.
 type StatementOutcome struct {
-	IsResultSet  bool
-	AffectedRows int64
-	DurationMs   int64
-	SessionState dto.SessionState
-	SessionEpoch int64
-	CurrentDB    string
-	Error        *dto.AppError
+	IsResultSet   bool
+	AffectedRows  int64
+	DurationMs    int64
+	SessionState  dto.SessionState
+	SessionEpoch  int64
+	CurrentDB     string
+	CurrentSchema string
+	Error         *dto.AppError
 }
 
 // ExecuteStatement runs one classified SQL statement on this tab's dedicated physical connection.
@@ -907,6 +1107,7 @@ func (ts *TabSession) ExecuteStatement(
 	readOnly := ts.readOnly
 	dialect := ts.dialect
 	curDB := ts.currentDB
+	curSchema := ts.currentSchema
 	ts.activeExecID = execID
 	ts.cancelSent = false
 	ts.cancelConfirmed = false
@@ -927,9 +1128,10 @@ func (ts *TabSession) ExecuteStatement(
 		if stmt.MutatesData || stmt.Kind == sqlsplit.KindWrite || stmt.Kind == sqlsplit.KindDDL || sqlsplit.IsReadOnlyEscapeSet(stmt.Text, splitDialect) {
 			st, ep := ts.snapshotState()
 			return StatementOutcome{
-				SessionState: st,
-				SessionEpoch: ep,
-				CurrentDB:    curDB,
+				SessionState:  st,
+				SessionEpoch:  ep,
+				CurrentDB:     curDB,
+				CurrentSchema: curSchema,
 				Error: &dto.AppError{
 					Code:         dto.ErrReadOnlyDenied,
 					Message:      "当前连接处于只读保护模式，已拦截写入或修改操作",
@@ -971,11 +1173,12 @@ func (ts *TabSession) ExecuteStatement(
 			interruptedByCancel = appErr.Code == dto.ErrStatementCanceled
 			info := ts.Info()
 			return StatementOutcome{
-				DurationMs:   time.Since(start).Milliseconds(),
-				SessionState: info.SessionState,
-				SessionEpoch: info.SessionEpoch,
-				CurrentDB:    info.CurrentDB,
-				Error:        appErr,
+				DurationMs:    time.Since(start).Milliseconds(),
+				SessionState:  info.SessionState,
+				SessionEpoch:  info.SessionEpoch,
+				CurrentDB:     info.CurrentDB,
+				CurrentSchema: info.CurrentSchema,
+				Error:         appErr,
 			}
 		}
 		var streamErr error
@@ -991,22 +1194,24 @@ func (ts *TabSession) ExecuteStatement(
 			interruptedByCancel = appErr.Code == dto.ErrStatementCanceled
 			info := ts.Info()
 			return StatementOutcome{
-				IsResultSet:  true,
-				DurationMs:   time.Since(start).Milliseconds(),
-				SessionState: info.SessionState,
-				SessionEpoch: info.SessionEpoch,
-				CurrentDB:    info.CurrentDB,
-				Error:        appErr,
+				IsResultSet:   true,
+				DurationMs:    time.Since(start).Milliseconds(),
+				SessionState:  info.SessionState,
+				SessionEpoch:  info.SessionEpoch,
+				CurrentDB:     info.CurrentDB,
+				CurrentSchema: info.CurrentSchema,
+				Error:         appErr,
 			}
 		}
 		ts.updateStateAfterSuccess(stmt, conn)
 		info := ts.Info()
 		return StatementOutcome{
-			IsResultSet:  true,
-			DurationMs:   time.Since(start).Milliseconds(),
-			SessionState: info.SessionState,
-			SessionEpoch: info.SessionEpoch,
-			CurrentDB:    info.CurrentDB,
+			IsResultSet:   true,
+			DurationMs:    time.Since(start).Milliseconds(),
+			SessionState:  info.SessionState,
+			SessionEpoch:  info.SessionEpoch,
+			CurrentDB:     info.CurrentDB,
+			CurrentSchema: info.CurrentSchema,
 		}
 	}
 
@@ -1016,23 +1221,25 @@ func (ts *TabSession) ExecuteStatement(
 		interruptedByCancel = appErr.Code == dto.ErrStatementCanceled
 		info := ts.Info()
 		return StatementOutcome{
-			DurationMs:   time.Since(start).Milliseconds(),
-			SessionState: info.SessionState,
-			SessionEpoch: info.SessionEpoch,
-			CurrentDB:    info.CurrentDB,
-			Error:        appErr,
+			DurationMs:    time.Since(start).Milliseconds(),
+			SessionState:  info.SessionState,
+			SessionEpoch:  info.SessionEpoch,
+			CurrentDB:     info.CurrentDB,
+			CurrentSchema: info.CurrentSchema,
+			Error:         appErr,
 		}
 	}
 
 	ts.updateStateAfterSuccess(stmt, conn)
 	info := ts.Info()
 	return StatementOutcome{
-		IsResultSet:  false,
-		AffectedRows: fact.AffectedRows,
-		DurationMs:   time.Since(start).Milliseconds(),
-		SessionState: info.SessionState,
-		SessionEpoch: info.SessionEpoch,
-		CurrentDB:    info.CurrentDB,
+		IsResultSet:   false,
+		AffectedRows:  fact.AffectedRows,
+		DurationMs:    time.Since(start).Milliseconds(),
+		SessionState:  info.SessionState,
+		SessionEpoch:  info.SessionEpoch,
+		CurrentDB:     info.CurrentDB,
+		CurrentSchema: info.CurrentSchema,
 	}
 }
 
@@ -1150,6 +1357,8 @@ func (ts *TabSession) handleExecError(conn driver.Conn, err error, wasInTx bool,
 
 	if appErr.Code == dto.ErrTxAborted || (wasInTx && ts.Dialect() == dto.EnginePostgres) {
 		// In PostgreSQL, any error (including canceled statement) inside a transaction aborts the tx block.
+		// Keep pendingTxDDL intact here because ROLLBACK TO SAVEPOINT can recover the transaction and
+		// later COMMIT pre-savepoint DDL; full ROLLBACK / SessionLost clears pendingTxDDL.
 		ts.stateMu.Lock()
 		if ts.conn == conn && ts.state == dto.SessionAliveInTx {
 			ts.state = dto.SessionAliveFailedTx
@@ -1180,6 +1389,11 @@ func (ts *TabSession) updateStateAfterSuccess(stmt sqlsplit.Statement, execConn 
 		ts.state = dto.SessionAliveInTx
 	case sqlsplit.KindCommit, sqlsplit.KindRollback:
 		ts.state = dto.SessionAliveIdle
+	case sqlsplit.KindRollbackToSavepoint:
+		// Savepoint rollback keeps the outer transaction open and recovers PG FailedTx back to InTx.
+		if ts.state == dto.SessionAliveFailedTx {
+			ts.state = dto.SessionAliveInTx
+		}
 	case sqlsplit.KindDDL:
 		if !ts.caps.DDLTransactional && ts.state == dto.SessionAliveInTx {
 			ts.state = dto.SessionAliveIdle
