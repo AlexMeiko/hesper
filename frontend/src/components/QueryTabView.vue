@@ -221,7 +221,7 @@ function onGridCopied(notice: GridCopyNotice) {
             v-if="tab.cancelPending"
             type="button"
             class="btn border-danger text-danger"
-            title="强制关闭当前标签页物理连接（原事务与临时表将失效）"
+            title="强制关闭当前标签页物理连接 (原事务与临时表将失效)"
             @click="wsStore.forceAbortQuery(tab.id)"
           >
             <ZapOff class="w-3.5 h-3.5" />
@@ -300,7 +300,7 @@ function onGridCopied(notice: GridCopyNotice) {
           :title="
             capabilities?.hasDatabases === false
               ? 'SQLite 引擎级只读打开 (mode=ro + query_only=ON)'
-              : '此连接启用了客户端只读保护（生产强只读仍以数据库账号权限为准）'
+              : '此连接启用了客户端只读保护 (生产强只读仍以数据库账号权限为准)'
           "
         >
           <Shield class="w-3 h-3" />
@@ -465,7 +465,7 @@ function onGridCopied(notice: GridCopyNotice) {
               class="rounded-lg border border-border bg-surface p-2.5 text-xs space-y-1"
             >
               <div class="flex items-center justify-between gap-2">
-                <span class="font-semibold text-ink">语句 #{{ st.index + 1 }}（第 {{ st.startLine }} 行）</span>
+                <span class="font-semibold text-ink">语句 #{{ st.index + 1 }} (第 {{ st.startLine }} 行)</span>
                 <span class="font-mono-tabular text-[11px] text-ink-muted">
                   {{
                     st.error
@@ -534,7 +534,7 @@ function onGridCopied(notice: GridCopyNotice) {
       class="absolute top-0 right-0 bottom-0 w-96 max-w-full border-l border-border-strong bg-elevated shadow-xl z-20 flex flex-col"
     >
       <div class="h-10 px-3 border-b border-border flex items-center justify-between shrink-0">
-        <span class="font-semibold text-xs text-ink">最近查询历史（点击填入编辑器）</span>
+        <span class="font-semibold text-xs text-ink">最近查询历史 (点击填入编辑器)</span>
         <button
           type="button"
           class="btn btn-ghost btn-icon-sm"

@@ -1,19 +1,22 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { Database, FilePlus2, Loader2, Plus, Table2, TerminalSquare, X } from 'lucide-vue-next'
+import { api } from '@/api/client'
 import { useDragResize } from '@/composables/useDragResize'
 import { useShortcuts } from '@/composables/useShortcuts'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace'
 import { envColorHex } from '@/utils/format'
+import { formatTablePath } from '@/utils/tableMeta'
 import CommandPalette from './components/CommandPalette.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConnectionModal from './components/ConnectionModal.vue'
 import ExplorerSidebar from './components/ExplorerSidebar.vue'
 import QueryTabView from './components/QueryTabView.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import SSHSecretModal from './components/SSHSecretModal.vue'
 import TableBrowseView from './components/TableBrowseView.vue'
 import TableDdlModal from './components/TableDdlModal.vue'
 import ToastHost from './components/ToastHost.vue'
@@ -42,8 +45,26 @@ function tabEnvColor(connId: string): string {
   return envColorHex(c?.envColor)
 }
 
+function tabTooltip(tab: WorkspaceTab): string {
+  if (tab.kind === 'browse') {
+    const active = connStore.getActive(tab.connectionId)
+    return formatTablePath(tab.database, tab.schema, tab.table, active?.capabilities.hasDatabases !== false)
+  }
+  return tab.title
+}
+
+let unsubSessionState: (() => void) | null = null
+
 onMounted(() => {
   void connStore.loadConnections()
+  unsubSessionState = api.onSessionStateChanged((evt) => {
+    wsStore.applySessionStateEvent(evt)
+  })
+})
+
+onUnmounted(() => {
+  unsubSessionState?.()
+  unsubSessionState = null
 })
 </script>
 
@@ -77,6 +98,7 @@ onMounted(() => {
           <div
             v-for="tab in wsStore.tabs"
             :key="tab.id"
+            :title="tabTooltip(tab)"
             class="group relative h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[13px] cursor-pointer max-w-[240px] shrink-0 border transition-colors"
             :class="
               wsStore.activeTabId === tab.id
@@ -98,7 +120,7 @@ onMounted(() => {
             <button
               type="button"
               class="ml-0.5 w-4 h-4 rounded flex items-center justify-center border-0 bg-transparent text-ink-secondary cursor-pointer opacity-60 hover:opacity-100 hover:bg-hover"
-              title="关闭标签页（同步释放该标签物理连接与快照缓存）"
+              title="关闭标签页 (同步释放该标签物理连接与快照缓存)"
               @click.stop="wsStore.closeTab(tab.id, { confirmDirty: true })"
             >
               <X class="w-3 h-3" />
@@ -129,10 +151,10 @@ onMounted(() => {
                     <Database class="w-6 h-6" />
                   </div>
                   <h1 class="text-lg font-semibold m-0 text-ink">
-                    欢迎使用 SQL Manager
+                    欢迎使用 Hesper
                   </h1>
                   <p class="text-xs m-0 leading-relaxed text-ink-muted">
-                    面向 MySQL、PostgreSQL、MariaDB 与 SQLite 的轻量桌面查询工作台。每个查询标签独占一条物理连接，表浏览与编辑器一次性快照清晰分离。
+                    长夜有星，数据有序。
                   </p>
                 </div>
 
@@ -151,33 +173,6 @@ onMounted(() => {
                     在「{{ connStore.connections[0].name }}」新建查询
                   </button>
                 </div>
-
-                <div class="rounded-xl border border-border bg-surface p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">双击表直接浏览</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      左侧展开库表后双击任意表即开启「实时浏览」；支持 WHERE 过滤、表头排序和结构/DDL 查看。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">编辑器执行一次 · 翻页读快照</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      按 Ctrl+Enter 运行当前语句，按 Esc 旁路停止；翻页只读第一次结果快照，绝不重复触发副作用。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">数值保真与 NULL 区分</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      BIGINT / DECIMAL 原样文本呈现不丢精度，NULL 与空串 "" 一眼可辨，BLOB 按需流式查看。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">清晰会话状态与快捷键</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      随时显示后端确认的会话状态；按 Ctrl+K 快速跳转、Ctrl+N 新建查询、Ctrl+W 关闭标签。
-                    </div>
-                  </div>
-                </div>
               </div>
             </div>
           </div>
@@ -192,6 +187,7 @@ onMounted(() => {
     <CommandPalette />
     <ValueInspector />
     <ConfirmDialog />
+    <SSHSecretModal />
     <ToastHost />
   </div>
 </template>

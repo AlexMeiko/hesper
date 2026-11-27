@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.sqlmanager.app</id>
+  <id>io.hesper.app</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <name>SQL Manager</name>
-  <summary>Lightweight desktop database query workbench for MySQL and PostgreSQL</summary>
+  <name>Hesper</name>
+  <summary>Lightweight cross-platform desktop database workbench for MySQL, PostgreSQL, MariaDB, and SQLite</summary>
   <description>
     <p>
-      SQL Manager is a fast, clean cross-platform desktop database client built with Go, Wails v3, and Vue 3.
+      Hesper is a fast, clean cross-platform desktop database client built with Go, Wails v3, and Vue 3.
       Each query tab owns a dedicated physical database connection, separating live table browsing from Execute-Once SQL snapshots.
     </p>
   </description>
-  <launchable type="desktop-id">sql-manager.desktop</launchable>
+  <launchable type="desktop-id">hesper.desktop</launchable>
   <provides>
-    <binary>sql-manager</binary>
+    <binary>hesper</binary>
   </provides>
   <releases>
     <release version="0.1.0" date="2026-11-25"/>

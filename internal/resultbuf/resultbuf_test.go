@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 func TestResultBufferSpillCapExpiryAndCleanup(t *testing.T) {

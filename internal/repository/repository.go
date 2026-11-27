@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"sql-manager/internal/entity"
-	appsql "sql-manager/sql"
+	"hesper/internal/entity"
+	appsql "hesper/sql"
 
 	_ "modernc.org/sqlite"
 )
@@ -232,5 +232,10 @@ func (l *LocalDB) SetKV(ctx context.Context, key, valueJSON string) error {
 		ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
 		key, valueJSON, time.Now().UnixMilli(),
 	)
+	return err
+}
+
+func (l *LocalDB) DeleteKV(ctx context.Context, key string) error {
+	_, err := l.db.ExecContext(ctx, `DELETE FROM app_kv WHERE key = ?`, key)
 	return err
 }

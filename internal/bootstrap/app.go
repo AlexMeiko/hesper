@@ -12,19 +12,24 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
-	"sql-manager/internal/binding"
-	"sql-manager/internal/config"
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/mysql"
-	"sql-manager/internal/driver/postgres"
-	"sql-manager/internal/driver/sqlite"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/secret"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
+	"hesper/internal/binding"
+	"hesper/internal/config"
+	"hesper/internal/driver"
+	"hesper/internal/driver/mysql"
+	"hesper/internal/driver/postgres"
+	"hesper/internal/driver/sqlite"
+	"hesper/internal/dto"
+	"hesper/internal/repository"
+	"hesper/internal/resultbuf"
+	"hesper/internal/secret"
+	"hesper/internal/service"
+	"hesper/internal/session"
+	"hesper/internal/tunnel"
 )
+
+func init() {
+	application.RegisterEvent[dto.SessionStateEvent]("session:state_changed")
+}
 
 // Run is the application Composition Root.
 // Wails v3 application lifecycle, dependency wiring, and window creation live strictly here.
@@ -50,13 +55,16 @@ func Run(paths config.Paths, assets fs.FS) error {
 		SpillDir: paths.ResultDir,
 	})
 
-	// 5. Pure Go application services & dedicated-connection session manager.
+	// 5. Pure Go application services, dedicated-connection session manager, and SSH tunnel pool.
 	connSvc := service.NewConnectionService(localDB, secretStore, nil, resMgr)
 	sessMgr := session.NewManager(reg, connSvc.ResolveConfig)
+	tunnelMgr := tunnel.NewManager(localDB, sessMgr.MarkConnectionLost)
 	connSvc.SetSessionManager(sessMgr)
+	connSvc.SetTunnelManager(tunnelMgr)
 
 	schemaSvc := service.NewSchemaService(sessMgr)
 	querySvc := service.NewQueryService(sessMgr, resMgr, localDB)
+	querySvc.SetSSHSecretPreparer(connSvc.PrepareRuntimeSSHCredential)
 
 	// 6. Thin Wails v3 boundary adapters.
 	connBinding := binding.NewConnectionBinding(connSvc)
@@ -66,7 +74,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 
 	// Optional port override for headless `-tags server` mode.
 	serverPort := 8080
-	if p := os.Getenv("SQL_MANAGER_PORT"); p != "" {
+	if p := os.Getenv("HESPER_PORT"); p != "" {
 		if parsed, convErr := strconv.Atoi(p); convErr == nil && parsed > 0 {
 			serverPort = parsed
 		}
@@ -74,7 +82,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 
 	// 7. Create Wails v3 application.
 	app := application.New(application.Options{
-		Name:        "SQL Manager",
+		Name:        "Hesper",
 		Description: "Lightweight cross-platform desktop database workbench for MySQL, PostgreSQL, MariaDB & SQLite",
 		LogLevel:    slog.LevelWarn,
 		Services: []application.Service{
@@ -98,18 +106,24 @@ func Run(paths config.Paths, assets fs.FS) error {
 		},
 		OnShutdown: func() {
 			sessMgr.CloseAll()
+			tunnelMgr.CloseAll()
 			resMgr.CloseAll()
 			_ = localDB.Close()
 		},
 	})
 
+	sessMgr.SetOnStateChanged(func(evt dto.SessionStateEvent) {
+		app.Event.Emit("session:state_changed", evt)
+	})
+
 	mainWin := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
-		Title:            "SQL Manager",
+		Title:            "Hesper",
 		Width:            1360,
 		Height:           860,
 		MinWidth:         960,
 		MinHeight:        640,
+		Frameless:        true,
 		BackgroundColour: application.NewRGB(248, 250, 252),
 		URL:              "/",
 	})
@@ -121,6 +135,27 @@ func Run(paths config.Paths, assets fs.FS) error {
 			AddFilter("SQLite 数据库 (*.db, *.sqlite, *.sqlite3)", "*.db;*.sqlite;*.sqlite3;*.db3").
 			AddFilter("所有文件 (*.*)", "*").
 			PromptForSingleSelection()
+	})
+
+	binding.AttachLocalFilePicker(connBinding, func(kind string) (string, error) {
+		dlg := app.Dialog.OpenFile().AttachToWindow(mainWin)
+		switch kind {
+		case "tls_ca":
+			dlg.SetTitle("选择 TLS CA 证书文件").
+				AddFilter("证书文件 (*.pem, *.crt, *.cer)", "*.pem;*.crt;*.cer")
+		case "tls_cert":
+			dlg.SetTitle("选择客户端 TLS 证书文件").
+				AddFilter("证书文件 (*.pem, *.crt, *.cer)", "*.pem;*.crt;*.cer")
+		case "tls_key":
+			dlg.SetTitle("选择客户端 TLS 私钥文件").
+				AddFilter("私钥文件 (*.key, *.pem)", "*.key;*.pem")
+		case "ssh_key":
+			dlg.SetTitle("选择 SSH 私钥文件").
+				ShowHiddenFiles(true)
+		default:
+			dlg.SetTitle("选择文件")
+		}
+		return dlg.AddFilter("所有文件 (*.*)", "*").PromptForSingleSelection()
 	})
 
 	return app.Run()

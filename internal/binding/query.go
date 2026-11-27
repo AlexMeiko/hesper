@@ -3,8 +3,8 @@ package binding
 import (
 	"context"
 
-	"sql-manager/internal/dto"
-	"sql-manager/internal/service"
+	"hesper/internal/dto"
+	"hesper/internal/service"
 )
 
 // QueryBinding is the Wails v3 boundary adapter for live table browsing, Execute-Once SQL,
@@ -21,6 +21,10 @@ func (b *QueryBinding) OpenTabSession(ctx context.Context, tabID, connID, db, sc
 	return b.svc.OpenTabSession(ctx, tabID, connID, db, schema)
 }
 
+func (b *QueryBinding) OpenTabSessionWithSSHSecret(ctx context.Context, tabID, connID, db, schema, sshSecret string, saveSecret bool) (dto.TabSessionInfo, error) {
+	return b.svc.OpenTabSessionWithSSHSecret(ctx, tabID, connID, db, schema, sshSecret, saveSecret)
+}
+
 func (b *QueryBinding) SwitchTabDatabase(ctx context.Context, tabID, targetDB string) (dto.TabSessionInfo, error) {
 	return b.svc.SwitchTabDatabase(ctx, tabID, targetDB)
 }
@@ -31,6 +35,10 @@ func (b *QueryBinding) SwitchTabSchema(ctx context.Context, tabID, targetSchema 
 
 func (b *QueryBinding) ReconnectTabSession(ctx context.Context, tabID, db, schema string) (dto.TabSessionInfo, error) {
 	return b.svc.ReconnectTabSession(ctx, tabID, db, schema)
+}
+
+func (b *QueryBinding) ReconnectTabSessionWithSSHSecret(ctx context.Context, tabID, db, schema, sshSecret string, saveSecret bool) (dto.TabSessionInfo, error) {
+	return b.svc.ReconnectTabSessionWithSSHSecret(ctx, tabID, db, schema, sshSecret, saveSecret)
 }
 
 func (b *QueryBinding) CloseTab(tabID string) error {

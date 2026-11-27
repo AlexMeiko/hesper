@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 // ResolvedConfig carries complete decrypted parameters needed by a driver Opener.
@@ -26,6 +26,8 @@ type ResolvedConfig struct {
 	ErrorCharset string // Fallback when the server does not report an error message encoding.
 	// DialContext allows injecting custom transports (SSH tunnel or deterministic fault-injection proxy in tests).
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// TunnelGen identifies the pooled SSH tunnel instance used to open this connection (0 when direct/transient).
+	TunnelGen uint64
 }
 
 // BoundStatement is a parameterized SQL statement shared by execution and preview.

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, markRaw, ref } from 'vue'
+import { computed, markRaw, reactive, ref } from 'vue'
 import { api, parseAppError } from '@/api/client'
 import {
   ErrorCode,
@@ -8,8 +8,11 @@ import {
   type BrowseTableResponse,
   type ExecuteSQLResponse,
   type QueryHistoryItem,
+  type SessionStateEvent,
   type StatementResult,
+  type TabSessionInfo,
 } from '@/api/types'
+import { runWithSSHChallenges } from '@/utils/sshChallenge'
 import { useConnectionsStore } from './connections'
 import { useSchemaStore } from './schema'
 import { useSettingsStore } from './settings'
@@ -32,6 +35,7 @@ export interface BrowseTab {
   showExecutedSql: boolean
   response: BrowseTableResponse | null
   error: AppError | null
+  droppedNotice?: string
 }
 
 export interface QueryStatementView extends StatementResult {
@@ -51,6 +55,9 @@ export interface QueryTab {
   /** Baseline SQL (initial template or last executed SQL) used to decide if tab has unsaved edits. */
   cleanSql: string
   sessionState: SessionState
+  sessionEpoch: number
+  /** True once a backend Track B TabSession has been created for this tab.id. */
+  sessionEstablished: boolean
   serverConnId: string
   readOnly: boolean
   running: boolean
@@ -75,6 +82,20 @@ function makeId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+function isTerminalSessionState(st: SessionState | undefined): boolean {
+  return st === SessionState.SessionLost || st === SessionState.SessionCommitUnknown
+}
+
+function isSessionLevelError(err: AppError | null | undefined): boolean {
+  if (!err) return false
+  return (
+    err.code === ErrorCode.ErrSessionLost ||
+    err.code === ErrorCode.ErrCommitOutcomeUnknown ||
+    err.code === ErrorCode.ErrTunnelFailed ||
+    err.code === ErrorCode.ErrConnectionFailed
+  )
+}
+
 export const useWorkspaceStore = defineStore('workspace', () => {
   const tabs = ref<WorkspaceTab[]>([])
   const activeTabId = ref<string>('')
@@ -83,6 +104,71 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const activeTab = computed<WorkspaceTab | null>(() => {
     return tabs.value.find((t) => t.id === activeTabId.value) ?? null
   })
+
+  /**
+   * Centralized monotonic epoch gate applied to EVERY RPC response and background event.
+   * Once a tab holds a confirmed sessionEpoch > 0, missing, zero, negative, or older epochs
+   * NEVER mutate sessionState or overwrite authoritative session-loss banners.
+   */
+  function applySessionState(
+    tab: QueryTab,
+    nextState: SessionState | undefined,
+    nextEpoch: number | undefined,
+    opts?: { sessionBannerError?: AppError | null; clearBanner?: boolean },
+  ): boolean {
+    const validEpoch = typeof nextEpoch === 'number' && Number.isInteger(nextEpoch) && nextEpoch > 0
+    if (tab.sessionEpoch > 0) {
+      if (!validEpoch || nextEpoch < tab.sessionEpoch) {
+        return false
+      }
+      if (
+        nextEpoch === tab.sessionEpoch &&
+        isTerminalSessionState(tab.sessionState) &&
+        nextState &&
+        !isTerminalSessionState(nextState)
+      ) {
+        return false
+      }
+    }
+    if (nextState) {
+      tab.sessionState = nextState
+    }
+    if (validEpoch) {
+      tab.sessionEpoch = nextEpoch
+    }
+    if (opts?.clearBanner) {
+      tab.bannerError = null
+    } else if (opts?.sessionBannerError) {
+      tab.bannerError = opts.sessionBannerError
+    }
+    return true
+  }
+
+  function applySessionStateEvent(evt: SessionStateEvent) {
+    const tab = tabs.value.find((t): t is QueryTab => t.kind === 'query' && t.id === evt.tabId)
+    if (!tab) return
+    let banner: AppError | null = null
+    if (evt.sessionState === SessionState.SessionCommitUnknown) {
+      banner = {
+        code: ErrorCode.ErrCommitOutcomeUnknown,
+        message: '写入或提交已发出，但在收到数据库确认前连接中断，结果未知。请先核对数据库实际数据，切勿直接重试。',
+        retrySafe: false,
+        sessionState: SessionState.SessionCommitUnknown,
+        sessionEpoch: evt.sessionEpoch,
+      }
+    } else if (evt.sessionState === SessionState.SessionLost) {
+      banner = {
+        code: ErrorCode.ErrSessionLost,
+        message: '后台检测到数据库连接或 SSH 隧道已断开 (原会话未提交事务与临时表已失效)，请点击重新连接建立新会话。',
+        retrySafe: false,
+        sessionState: SessionState.SessionLost,
+        sessionEpoch: evt.sessionEpoch,
+      }
+    }
+    applySessionState(tab, evt.sessionState, evt.sessionEpoch, {
+      sessionBannerError: banner,
+    })
+  }
 
   function findBrowseTab(tabId: string): BrowseTab | undefined {
     return tabs.value.find((t): t is BrowseTab => t.id === tabId && t.kind === 'browse')
@@ -122,7 +208,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       return existing
     }
 
-    const tab: BrowseTab = {
+    const tab: BrowseTab = reactive({
       id: makeId('browse'),
       kind: 'browse',
       title: schema ? `${schema}.${table}` : table,
@@ -139,7 +225,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       showExecutedSql: false,
       response: null,
       error: null,
-    }
+    })
     tabs.value.push(tab)
     activeTabId.value = tab.id
     await refreshBrowseTab(tab.id)
@@ -164,6 +250,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         filterWhere: tab.filterWhere,
       })
       tab.response = resp ? markRaw(resp) : null
+      tab.droppedNotice = ''
     } catch (err) {
       tab.error = parseAppError(err)
     } finally {
@@ -249,7 +336,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
             return
           }
           tab.schema = info.currentSchema || chosen
-          tab.sessionState = info.sessionState
+          applySessionState(tab, info.sessionState, info.sessionEpoch)
         }
       }
     } catch {
@@ -284,7 +371,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const targetSchema = schema
 
     const id = makeId('query')
-    const tab: QueryTab = {
+    const tab: QueryTab = reactive({
       id,
       kind: 'query',
       title: customTitle || `查询 ${querySeq++}`,
@@ -294,6 +381,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       sql: initialSql,
       cleanSql: initialSql,
       sessionState: SessionState.SessionAliveIdle,
+      sessionEpoch: 0,
+      sessionEstablished: false,
       serverConnId: '',
       readOnly: Boolean(conn?.readOnly),
       running: false,
@@ -307,7 +396,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       noticeMessage: '',
       historyOpen: false,
       history: [],
-    }
+    })
     tabs.value.push(tab)
     activeTabId.value = tab.id
 
@@ -324,41 +413,77 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
     }
 
-    // Open dedicated Track B physical connection immediately so user sees confirmed SessionState & ConnID
+    // Open dedicated Track B physical connection immediately (supporting SSH TOFU & password prompts
+    // even when activeMap already exists after a background tunnel disconnect!).
     let sessionOpened = false
-    try {
-      const info = await api.openTabSession(tab.id, connectionId, targetDb, targetSchema)
-      sessionOpened = true
+    const openOutcome = await runWithSSHChallenges<TabSessionInfo>({
+      run: async (secret) => {
+        const info = secret
+          ? await api.openTabSessionWithSSHSecret(
+              tab.id,
+              connectionId,
+              targetDb,
+              targetSchema,
+              secret.secret,
+              secret.saveSecret,
+            )
+          : await api.openTabSession(tab.id, connectionId, targetDb, targetSchema)
+        sessionOpened = true
+        return info
+      },
+      isStillCurrent: () => connStore.isConnectionCurrent(connectionId, connEpoch) && Boolean(findQueryTab(tab.id)),
+      onTrustHostKey: (hostPort, algorithm, fingerprint) =>
+        api.trustSSHHostKey(hostPort, algorithm, fingerprint),
+      onCredentialSaved: () => {
+        void connStore.loadConnections()
+      },
+    })
+
+    if (openOutcome.ok) {
+      const info = openOutcome.value
       if (!connStore.isConnectionCurrent(connectionId, connEpoch) || !findQueryTab(tab.id)) {
         abortPendingTab(true)
         return null
       }
+      tab.sessionEstablished = true
       tab.database = info.currentDb || targetDb
       tab.schema = info.currentSchema || targetSchema
-      tab.sessionState = info.sessionState
+      applySessionState(tab, info.sessionState, info.sessionEpoch, { clearBanner: true })
       tab.serverConnId = info.serverConnId || ''
       tab.readOnly = info.readOnly
-    } catch (err) {
-      if (!connStore.isConnectionCurrent(connectionId, connEpoch) || !findQueryTab(tab.id)) {
-        abortPendingTab(false)
+
+      await syncSchemaIfUnset(tab, Boolean(active.capabilities.hasSchemas), connEpoch)
+      if (!connStore.isConnectionCurrent(connectionId, connEpoch)) {
+        abortPendingTab(true)
         return null
       }
-      const appErr = parseAppError(err)
-      tab.sessionState = appErr.sessionState || SessionState.SessionLost
-      tab.bannerError = appErr
-    }
+      if (!findQueryTab(tab.id)) {
+        return null
+      }
 
-    await syncSchemaIfUnset(tab, Boolean(active.capabilities.hasSchemas), connEpoch)
-    if (!connStore.isConnectionCurrent(connectionId, connEpoch)) {
-      abortPendingTab(sessionOpened)
-      return null
-    }
-    if (!findQueryTab(tab.id)) {
-      return null
-    }
-
-    if (tab.database || !active.capabilities.hasDatabases) {
-      void schemaStore.loadCompletionCatalog(connectionId, tab.database, tab.schema)
+      if (tab.database || !active.capabilities.hasDatabases) {
+        void schemaStore.loadCompletionCatalog(connectionId, tab.database, tab.schema)
+      }
+    } else {
+      if (!connStore.isConnectionCurrent(connectionId, connEpoch) || !findQueryTab(tab.id)) {
+        abortPendingTab(sessionOpened)
+        return null
+      }
+      if (openOutcome.canceled) {
+        applySessionState(tab, SessionState.SessionLost, tab.sessionEpoch || undefined, {
+          sessionBannerError: {
+            code: ErrorCode.ErrSessionLost,
+            message: '已取消 SSH 验证，请点击重新连接建立会话',
+            retrySafe: false,
+            sessionState: SessionState.SessionLost,
+          },
+        })
+      } else if (openOutcome.error) {
+        const appErr = openOutcome.error
+        applySessionState(tab, appErr.sessionState || SessionState.SessionLost, appErr.sessionEpoch, {
+          sessionBannerError: appErr,
+        })
+      }
     }
 
     return tab
@@ -399,8 +524,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const prevDb = tab.database
     const prevSchema = tab.schema
 
-    // Strictly reflect backend-authoritative session state (never guess!)
-    tab.sessionState = resp.sessionState
+    // Strictly gate backend-authoritative session state with monotonic sessionEpoch.
+    const stateAccepted = applySessionState(tab, resp.sessionState, resp.sessionEpoch)
     if (resp.currentDb) tab.database = resp.currentDb
     if (resp.currentSchema !== undefined && resp.currentSchema !== '') {
       tab.schema = resp.currentSchema
@@ -420,11 +545,32 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     tab.statements = stmts
 
     if (resp.error) {
-      tab.bannerError = resp.error
+      // Non-session errors (e.g. SQL syntax) can always display; session-level banners must respect epoch!
+      if (!isSessionLevelError(resp.error)) {
+        if (!isTerminalSessionState(tab.sessionState)) {
+          tab.bannerError = resp.error
+        }
+      } else if (stateAccepted) {
+        tab.bannerError = resp.error
+      }
     }
 
     const firstResultIdx = stmts.findIndex((s) => s.isResultSet)
     tab.activeResultIdx = firstResultIdx >= 0 ? firstResultIdx : stmts.length > 0 ? 0 : -1
+
+    // Apply backend-reported structural DDL changes to Explorer caches & open browse tabs.
+    if (resp.schemaChanges) {
+      void schemaStore.applySchemaChanges(tab.connectionId, resp.schemaChanges)
+      const droppedDbs = resp.schemaChanges.droppedDatabases ?? []
+      if (droppedDbs.length > 0) {
+        const droppedSet = new Set(droppedDbs)
+        for (const t of tabs.value) {
+          if (t.kind === 'browse' && t.connectionId === tab.connectionId && droppedSet.has(t.database)) {
+            t.droppedNotice = `所属数据库「${t.database}」已被删除，当前保留的是历史缓存数据。`
+          }
+        }
+      }
+    }
 
     // Refresh autocomplete catalog & schema list when SQL execution switched DB/Schema (e.g. USE other_db)
     if (tab.database !== prevDb || tab.schema !== prevSchema) {
@@ -460,7 +606,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       tab.activeExecId = execId
       tab.cancelPending = false
       tab.startedAt = Date.now()
-      tab.bannerError = null
+      if (!isTerminalSessionState(tab.sessionState)) {
+        tab.bannerError = null
+      }
       tab.noticeMessage = ''
 
       try {
@@ -478,9 +626,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         })
       } catch (err) {
         const appErr = parseAppError(err)
-        tab.bannerError = appErr
-        if (appErr.sessionState) {
-          tab.sessionState = appErr.sessionState
+        const accepted = appErr.sessionState
+          ? applySessionState(tab, appErr.sessionState, appErr.sessionEpoch, {
+              sessionBannerError: isSessionLevelError(appErr) ? appErr : undefined,
+            })
+          : false
+        if (!isSessionLevelError(appErr) && !isTerminalSessionState(tab.sessionState)) {
+          tab.bannerError = appErr
+        } else if (accepted) {
+          tab.bannerError = appErr
         }
         return null
       } finally {
@@ -574,7 +728,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       const res = await api.cancelExecution(tab.id, tab.activeExecId)
       if (res.sessionState) {
-        tab.sessionState = res.sessionState
+        applySessionState(tab, res.sessionState, res.sessionEpoch)
       }
       tab.noticeMessage = res.message
       if (res.status === 'session_lost') {
@@ -593,20 +747,34 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const uiStore = useUiStore()
     try {
       const info = await api.forceAbortSession(tab.id)
-      tab.sessionState = info.sessionState
+      const isUnknown = info.sessionState === SessionState.SessionCommitUnknown
+      const banner: AppError = isUnknown
+        ? {
+            code: ErrorCode.ErrCommitOutcomeUnknown,
+            message: '写入或提交结果仍未知，请先核对数据库实际数据并显式重新连接，切勿直接重试',
+            retrySafe: false,
+            sessionState: SessionState.SessionCommitUnknown,
+            sessionEpoch: info.sessionEpoch,
+          }
+        : {
+            code: ErrorCode.ErrSessionLost,
+            message: '已强制中断当前物理连接，原会话的未提交事务与临时表已失效',
+            retrySafe: false,
+            sessionState: SessionState.SessionLost,
+            sessionEpoch: info.sessionEpoch,
+          }
+      applySessionState(tab, info.sessionState, info.sessionEpoch, { sessionBannerError: banner })
       tab.running = false
       tab.activeExecId = ''
-      tab.bannerError = {
-        code: ErrorCode.ErrSessionLost,
-        message: '已强制中断当前物理连接，原会话的未提交事务与临时表已失效',
-        retrySafe: false,
-        sessionState: SessionState.SessionLost,
-      }
     } catch (err) {
       const appErr = parseAppError(err)
-      tab.bannerError = appErr
-      if (appErr.sessionState) {
-        tab.sessionState = appErr.sessionState
+      const accepted = appErr.sessionState
+        ? applySessionState(tab, appErr.sessionState, appErr.sessionEpoch, { sessionBannerError: appErr })
+        : false
+      if (!isSessionLevelError(appErr) && !isTerminalSessionState(tab.sessionState)) {
+        tab.bannerError = appErr
+      } else if (accepted) {
+        tab.bannerError = appErr
       }
       uiStore.notify('error', '强制中断会话失败', appErr.message)
     } finally {
@@ -617,19 +785,78 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   async function reconnectQueryTab(tabId: string) {
     const tab = findQueryTab(tabId)
     if (!tab) return
+    const connStore = useConnectionsStore()
+    const schemaStore = useSchemaStore()
     const uiStore = useUiStore()
-    try {
-      const info = await api.reconnectTabSession(tab.id, tab.database, tab.schema)
+    const connEpoch = connStore.getConnectionEpoch(tab.connectionId)
+    const needsInitialOpen = !tab.sessionEstablished
+    let openedThisAttempt = false
+
+    const outcome = await runWithSSHChallenges<TabSessionInfo>({
+      run: async (secret) => {
+        if (needsInitialOpen) {
+          const info = secret
+            ? await api.openTabSessionWithSSHSecret(
+                tab.id,
+                tab.connectionId,
+                tab.database,
+                tab.schema,
+                secret.secret,
+                secret.saveSecret,
+              )
+            : await api.openTabSession(tab.id, tab.connectionId, tab.database, tab.schema)
+          openedThisAttempt = true
+          return info
+        }
+        return secret
+          ? api.reconnectTabSessionWithSSHSecret(tab.id, tab.database, tab.schema, secret.secret, secret.saveSecret)
+          : api.reconnectTabSession(tab.id, tab.database, tab.schema)
+      },
+      isStillCurrent: () => Boolean(findQueryTab(tabId)) && connStore.getConnectionEpoch(tab.connectionId) === connEpoch,
+      onTrustHostKey: (hostPort, algorithm, fingerprint) =>
+        api.trustSSHHostKey(hostPort, algorithm, fingerprint),
+      onCredentialSaved: () => {
+        void connStore.loadConnections()
+      },
+    })
+
+    if (!findQueryTab(tabId) || connStore.getConnectionEpoch(tab.connectionId) !== connEpoch) {
+      if (openedThisAttempt) {
+        void api.closeTab(tab.id).catch(() => {})
+      }
+      return
+    }
+    if (outcome.ok) {
+      const info = outcome.value
+      tab.sessionEstablished = true
       tab.database = info.currentDb || tab.database
       tab.schema = info.currentSchema || tab.schema
-      tab.sessionState = info.sessionState
-      tab.serverConnId = info.serverConnId || ''
-      tab.bannerError = null
-      tab.noticeMessage = '已建立全新物理会话'
+      tab.readOnly = info.readOnly
+      const accepted = applySessionState(tab, info.sessionState, info.sessionEpoch, { clearBanner: true })
+      if (accepted) {
+        tab.serverConnId = info.serverConnId || ''
+        tab.noticeMessage = '已建立全新物理会话'
+      }
+      if (needsInitialOpen) {
+        const active = connStore.getActive(tab.connectionId)
+        await syncSchemaIfUnset(tab, Boolean(active?.capabilities.hasSchemas), connEpoch)
+        if (findQueryTab(tabId) && connStore.getConnectionEpoch(tab.connectionId) === connEpoch) {
+          if (tab.database || !active?.capabilities.hasDatabases) {
+            void schemaStore.loadCompletionCatalog(tab.connectionId, tab.database, tab.schema)
+          }
+        }
+      }
       uiStore.notify('success', '已建立新会话', info.serverConnId ? `连接 ID: #${info.serverConnId}` : undefined)
-    } catch (err) {
-      const appErr = parseAppError(err)
-      tab.bannerError = appErr
+      return
+    }
+    if (outcome.canceled || outcome.aborted) {
+      return
+    }
+    if (outcome.error) {
+      const appErr = outcome.error
+      if (!isSessionLevelError(appErr) || applySessionState(tab, appErr.sessionState, appErr.sessionEpoch)) {
+        tab.bannerError = appErr
+      }
       uiStore.notify('error', '重新连接失败', appErr.message)
     }
   }
@@ -646,11 +873,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!connStore.isConnectionCurrent(tab.connectionId, connEpoch) || !findQueryTab(tabId)) {
         return
       }
-      tab.database = info.currentDb || targetDb
-      tab.schema = info.currentSchema || ''
-      tab.sessionState = info.sessionState
-      tab.serverConnId = info.serverConnId || tab.serverConnId
-      tab.bannerError = null
+      const accepted = applySessionState(tab, info.sessionState, info.sessionEpoch, { clearBanner: true })
+      if (accepted) {
+        tab.database = info.currentDb || targetDb
+        tab.schema = info.currentSchema || ''
+        tab.serverConnId = info.serverConnId || tab.serverConnId
+      }
 
       const active = connStore.getActive(tab.connectionId)
       await syncSchemaIfUnset(tab, Boolean(active?.capabilities.hasSchemas), connEpoch)
@@ -663,7 +891,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         return
       }
       const appErr = parseAppError(err)
-      tab.bannerError = appErr
+      const accepted = appErr.sessionState
+        ? applySessionState(tab, appErr.sessionState, appErr.sessionEpoch, {
+            sessionBannerError: isSessionLevelError(appErr) ? appErr : undefined,
+          })
+        : false
+      if (!isSessionLevelError(appErr) && !isTerminalSessionState(tab.sessionState)) {
+        tab.bannerError = appErr
+      } else if (accepted) {
+        tab.bannerError = appErr
+      }
       uiStore.notify('warning', '切换数据库失败', appErr.message)
     }
   }
@@ -680,16 +917,26 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (!connStore.isConnectionCurrent(tab.connectionId, connEpoch) || !findQueryTab(tabId)) {
         return
       }
-      tab.schema = info.currentSchema || targetSchema
-      tab.sessionState = info.sessionState
-      tab.bannerError = null
+      const accepted = applySessionState(tab, info.sessionState, info.sessionEpoch, { clearBanner: true })
+      if (accepted) {
+        tab.schema = info.currentSchema || targetSchema
+      }
       void schemaStore.loadCompletionCatalog(tab.connectionId, tab.database, tab.schema)
     } catch (err) {
       if (!connStore.isConnectionCurrent(tab.connectionId, connEpoch) || !findQueryTab(tabId)) {
         return
       }
       const appErr = parseAppError(err)
-      tab.bannerError = appErr
+      const accepted = appErr.sessionState
+        ? applySessionState(tab, appErr.sessionState, appErr.sessionEpoch, {
+            sessionBannerError: isSessionLevelError(appErr) ? appErr : undefined,
+          })
+        : false
+      if (!isSessionLevelError(appErr) && !isTerminalSessionState(tab.sessionState)) {
+        tab.bannerError = appErr
+      } else if (accepted) {
+        tab.bannerError = appErr
+      }
       uiStore.notify('warning', '切换 Schema 失败', appErr.message)
     }
   }
@@ -779,6 +1026,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     isQueryTabDirty,
     hasDirtyOrRunningTabs,
     setActiveTab,
+    applySessionStateEvent,
     openTableBrowse,
     refreshBrowseTab,
     setBrowseFilter,

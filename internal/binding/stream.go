@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"sql-manager/internal/service"
+	"hesper/internal/service"
 )
 
 // StreamBinding implements http.Handler mounted at /stream by Wails v3 ServiceOptions.

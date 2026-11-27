@@ -2,16 +2,14 @@ package postgres
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -19,8 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 const (
@@ -53,7 +51,7 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 		timeout = 10 * time.Second
 	}
 
-	pgCfg, err := pgx.ParseConfig("")
+	pgCfg, err := pgx.ParseConfig("host=127.0.0.1 port=5432 sslmode=disable")
 	if err != nil {
 		return nil, err
 	}
@@ -67,16 +65,25 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	if pgCfg.RuntimeParams == nil {
 		pgCfg.RuntimeParams = map[string]string{}
 	}
-	pgCfg.RuntimeParams["application_name"] = "sql-manager"
+	pgCfg.RuntimeParams["application_name"] = "hesper"
 	if cfg.ReadOnly {
 		pgCfg.RuntimeParams["default_transaction_read_only"] = "on"
 	}
 
-	if err := configureTLS(pgCfg, cfg.TLS, host); err != nil {
+	if err := configureTLS(pgCfg, cfg.TLS, host, port); err != nil {
 		return nil, err
 	}
 
-	var tracked *driver.TrackedConn
+	if cfg.DialContext != nil {
+		// Delegate hostname resolution to the remote SSH bastion / custom transport.
+		pgCfg.LookupFunc = func(_ context.Context, h string) ([]string, error) {
+			return []string{h}, nil
+		}
+	}
+
+	var tracked atomic.Pointer[driver.TrackedConn]
+	var connecting atomic.Bool
+	connecting.Store(true)
 	pgCfg.DialFunc = func(dctx context.Context, network, addr string) (net.Conn, error) {
 		var raw net.Conn
 		var derr error
@@ -90,11 +97,14 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 			return nil, derr
 		}
 		tc := driver.NewTrackedConn(raw)
-		tracked = tc
+		if connecting.Load() {
+			tracked.Store(tc)
+		}
 		return tc, nil
 	}
 
 	conn, err := pgx.ConnectConfig(ctx, pgCfg)
+	connecting.Store(false)
 	if err != nil {
 		// Authentication failures can arrive before PostgreSQL reports client_encoding.
 		return nil, classifyPGError(err, "", cfg.ErrorCharset)
@@ -114,7 +124,7 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 
 	return &Conn{
 		conn:          conn,
-		tracked:       tracked,
+		tracked:       tracked.Load(),
 		connCtx:       connCtx,
 		connCancel:    connCancel,
 		version:       serverVer,
@@ -126,46 +136,26 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	}, nil
 }
 
-func configureTLS(pgCfg *pgx.ConnConfig, tlsCfg dto.TLSConfig, host string) error {
-	mode := strings.ToLower(strings.TrimSpace(tlsCfg.Mode))
-	switch mode {
-	case "", "disable":
-		pgCfg.TLSConfig = nil
-		return nil
-	case "prefer", "require":
-		pgCfg.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
-		return nil
-	case "verify-ca", "verify-full":
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
-		if mode == "verify-ca" {
-			tc.InsecureSkipVerify = true
-		} else {
-			tc.ServerName = host
-		}
-		if tlsCfg.CACertPath != "" {
-			pemBytes, err := os.ReadFile(tlsCfg.CACertPath)
-			if err != nil {
-				return fmt.Errorf("read tls ca cert: %w", err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pemBytes) {
-				return errors.New("invalid tls ca certificate pem")
-			}
-			tc.RootCAs = pool
-		}
-		if tlsCfg.CertPath != "" && tlsCfg.KeyPath != "" {
-			cert, err := tls.LoadX509KeyPair(tlsCfg.CertPath, tlsCfg.KeyPath)
-			if err != nil {
-				return fmt.Errorf("load tls client keypair: %w", err)
-			}
-			tc.Certificates = []tls.Certificate{cert}
-		}
-		pgCfg.TLSConfig = tc
-		return nil
-	default:
-		pgCfg.TLSConfig = nil
-		return nil
+func configureTLS(pgCfg *pgx.ConnConfig, tlsCfg dto.TLSConfig, host string, port int) error {
+	// Always clear any environment- or default-derived fallback candidates.
+	pgCfg.Fallbacks = nil
+	tc, err := driver.BuildTLSConfig(tlsCfg, host)
+	if err != nil {
+		return err
 	}
+	mode := driver.NormalizeTLSMode(tlsCfg.Mode)
+	pgCfg.TLSConfig = tc
+	if mode == "prefer" {
+		// Allow plaintext fallback ONLY to the exact same target host and port.
+		pgCfg.Fallbacks = []*pgconn.FallbackConfig{
+			{
+				Host:      host,
+				Port:      uint16(port),
+				TLSConfig: nil,
+			},
+		}
+	}
+	return nil
 }
 
 // Conn represents one dedicated physical PostgreSQL connection.
@@ -905,7 +895,7 @@ func classifyPGError(err error, reportedCharset, fallbackCharset string) *dto.Ap
 		case "25006", "42501": // read_only_sql_transaction / insufficient_privilege
 			return &dto.AppError{
 				Code:     dto.ErrReadOnlyDenied,
-				Message:  "数据库拒绝写入操作（只读权限或只读事务限制）",
+				Message:  "数据库拒绝写入操作 (只读权限或只读事务限制)",
 				Detail:   pgErr.Message,
 				SQLState: pgErr.Code,
 			}

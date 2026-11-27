@@ -15,29 +15,41 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as dto$0 from "../dto/models.js";
 
 export function Connect(connID: string): $CancellablePromise<dto$0.ConnectResult> {
-    return $Call.ByID(1637245882, connID);
+    return $Call.ByID(2838345459, connID);
+}
+
+export function ConnectWithSSHSecret(connID: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.ConnectResult> {
+    return $Call.ByID(2971006203, connID, sshSecret, saveSecret);
 }
 
 export function DeleteConnection(id: string): $CancellablePromise<void> {
-    return $Call.ByID(292346535, id);
+    return $Call.ByID(4048064348, id);
 }
 
 export function Disconnect(connID: string): $CancellablePromise<void> {
-    return $Call.ByID(701919582, connID);
+    return $Call.ByID(2383249845, connID);
 }
 
 export function ListConnections(): $CancellablePromise<dto$0.ConnectionDTO[] | null> {
-    return $Call.ByID(760268029);
+    return $Call.ByID(2988091604);
+}
+
+export function PickLocalFile(kind: string): $CancellablePromise<string> {
+    return $Call.ByID(3526413407, kind);
 }
 
 export function PickSQLiteFile(): $CancellablePromise<string> {
-    return $Call.ByID(4215676539);
+    return $Call.ByID(2064412052);
 }
 
 export function SaveConnection(req: dto$0.SaveConnectionRequest): $CancellablePromise<dto$0.ConnectionDTO> {
-    return $Call.ByID(2118137821, req);
+    return $Call.ByID(1790417374, req);
 }
 
 export function TestConnection(req: dto$0.SaveConnectionRequest): $CancellablePromise<dto$0.TestConnectionResult> {
-    return $Call.ByID(1170076376, req);
+    return $Call.ByID(4210045995, req);
+}
+
+export function TrustSSHHostKey(hostPort: string, algorithm: string, fingerprint: string): $CancellablePromise<void> {
+    return $Call.ByID(719880804, hostPort, algorithm, fingerprint);
 }

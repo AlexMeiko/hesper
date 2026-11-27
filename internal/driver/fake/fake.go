@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 // FaultBehavior controls deterministic fault injection for pure unit tests in internal/session & internal/service.

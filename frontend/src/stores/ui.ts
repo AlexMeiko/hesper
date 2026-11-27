@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { CellValue, ColumnMeta, ConnectionDTO } from '@/api/types'
+import type { CellValue, ColumnMeta, ConnectionDTO, SSHAuthPrompt } from '@/api/types'
 
 export interface ToastItem {
   id: number
@@ -38,6 +38,11 @@ export interface ConfirmDialogState extends ConfirmOptions {
   cancelLabel: string
 }
 
+export interface SSHSecretSubmission {
+  secret: string
+  saveSecret: boolean
+}
+
 /**
  * Centralized UI store owning global toasts and all modal overlays
  * so Esc priority handling and modal lifecycle stay in one predictable place.
@@ -68,6 +73,9 @@ export const useUiStore = defineStore('ui', () => {
   const inspectedCell = ref<InspectedCell | null>(null)
   const confirmDialog = ref<ConfirmDialogState | null>(null)
   let confirmResolver: ((ok: boolean) => void) | null = null
+  const sshSecretPrompt = ref<SSHAuthPrompt | null>(null)
+  const sshSecretSaveMode = ref<'immediate' | 'form'>('immediate')
+  let sshSecretResolver: ((res: SSHSecretSubmission | null) => void) | null = null
 
   function openNewConnectionModal() {
     editingConnection.value = null
@@ -143,9 +151,33 @@ export const useUiStore = defineStore('ui', () => {
     resolver?.(ok)
   }
 
+  function requestSSHSecret(
+    prompt: SSHAuthPrompt,
+    opts?: { saveMode?: 'immediate' | 'form' },
+  ): Promise<SSHSecretSubmission | null> {
+    if (sshSecretResolver) {
+      sshSecretResolver(null)
+      sshSecretResolver = null
+    }
+    sshSecretSaveMode.value = opts?.saveMode ?? 'immediate'
+    sshSecretPrompt.value = prompt
+    return new Promise<SSHSecretSubmission | null>((resolve) => {
+      sshSecretResolver = resolve
+    })
+  }
+
+  function resolveSSHSecret(res: SSHSecretSubmission | null) {
+    const resolver = sshSecretResolver
+    sshSecretResolver = null
+    sshSecretPrompt.value = null
+    sshSecretSaveMode.value = 'immediate'
+    resolver?.(res)
+  }
+
   const hasOpenModal = computed(
     () =>
       Boolean(confirmDialog.value) ||
+      Boolean(sshSecretPrompt.value) ||
       Boolean(inspectedCell.value) ||
       commandPaletteOpen.value ||
       settingsModalOpen.value ||
@@ -160,6 +192,10 @@ export const useUiStore = defineStore('ui', () => {
   function closeTopModal(): boolean {
     if (confirmDialog.value) {
       resolveConfirm(false)
+      return true
+    }
+    if (sshSecretPrompt.value) {
+      resolveSSHSecret(null)
       return true
     }
     if (inspectedCell.value) {
@@ -196,6 +232,8 @@ export const useUiStore = defineStore('ui', () => {
     ddlTarget,
     inspectedCell,
     confirmDialog,
+    sshSecretPrompt,
+    sshSecretSaveMode,
     hasOpenModal,
     openNewConnectionModal,
     openEditConnectionModal,
@@ -211,6 +249,8 @@ export const useUiStore = defineStore('ui', () => {
     closeInspector,
     requestConfirm,
     resolveConfirm,
+    requestSSHSecret,
+    resolveSSHSecret,
     closeTopModal,
   }
 })

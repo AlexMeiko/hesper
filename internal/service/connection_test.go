@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"sql-manager/internal/dto"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/secret"
-	"sql-manager/internal/service"
+	"hesper/internal/dto"
+	"hesper/internal/repository"
+	"hesper/internal/secret"
+	"hesper/internal/service"
 )
 
 func TestConnectionService_ErrorCharsetValidation(t *testing.T) {

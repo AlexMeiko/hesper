@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/fake"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/session"
-	"sql-manager/internal/sqlsplit"
+	"hesper/internal/driver"
+	"hesper/internal/driver/fake"
+	"hesper/internal/dto"
+	"hesper/internal/session"
+	"hesper/internal/sqlsplit"
 )
 
 func newFakeSessionManager(b fake.FaultBehavior) (*session.Manager, *fake.Opener) {

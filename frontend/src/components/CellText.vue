@@ -46,7 +46,7 @@ const tokens = computed(() => {
     v-else-if="isEmpty"
     data-cell-kind="empty-string"
     class="font-mono-tabular select-none text-ink-faint"
-    title="空字符串（长度 0，非 NULL）"
+    title="空字符串 (长度 0，非 NULL)"
   >""</span>
 
   <!-- 3. Binary / BLOB: muted size prefix + hex preview -->

@@ -15,6 +15,11 @@ export interface AppError {
     "position"?: number;
     "retrySafe": boolean;
     "sessionState"?: SessionState;
+    "sessionEpoch"?: number;
+    "hostKeyChallenge"?: SSHHostKeyChallenge | null;
+    "sshAuthPrompt"?: SSHAuthPrompt | null;
+    "credentialSaved"?: boolean;
+    "saveWarning"?: string;
 }
 
 /**
@@ -74,6 +79,7 @@ export interface CancelExecutionResponse {
      */
     "status": string;
     "sessionState": SessionState;
+    "sessionEpoch"?: number;
     "message": string;
 }
 
@@ -158,6 +164,8 @@ export interface ConnectResult {
     "serverVersion": string;
     "currentDb": string;
     "capabilities": Capabilities;
+    "credentialSaved"?: boolean;
+    "saveWarning"?: string;
 }
 
 /**
@@ -177,6 +185,8 @@ export interface ConnectionDTO {
     "readOnly": boolean;
     "params": ConnectionParams;
     "hasPassword": boolean;
+    "hasSshPassword"?: boolean;
+    "hasSshPassphrase"?: boolean;
     "sortOrder": number;
     "createdAt": number;
     "updatedAt": number;
@@ -196,6 +206,7 @@ export interface ConnectionParams {
      */
     "filePath"?: string;
     "tls": TLSConfig;
+    "ssh"?: SSHConfig | null;
     "connectTimeoutS"?: number;
     "errorCharset"?: string;
 }
@@ -296,12 +307,14 @@ export interface ExecuteSQLResponse {
     "currentDb": string;
     "currentSchema"?: string;
     "sessionState": SessionState;
+    "sessionEpoch"?: number;
     "statements": StatementResult[] | null;
     "executedAll"?: boolean;
     "totalMs": number;
     "requiresConfirm"?: boolean;
     "confirmToken"?: string;
     "highRiskStatements"?: HighRiskStatement[] | null;
+    "schemaChanges"?: SchemaChanges | null;
     "error"?: AppError | null;
 }
 
@@ -402,6 +415,51 @@ export enum RowIdentityKind {
 };
 
 /**
+ * SSHAuthPrompt requests a runtime SSH password or private-key passphrase from the user.
+ */
+export interface SSHAuthPrompt {
+    "connectionId"?: string;
+    "hostPort": string;
+    "username": string;
+
+    /**
+     * password | key
+     */
+    "authMethod": string;
+    "needPassphrase"?: boolean;
+    "reason"?: string;
+}
+
+/**
+ * SSHConfig holds non-secret SSH bastion tunnel parameters stored in app.db config_json.
+ * Plaintext SSH passwords and passphrases are NEVER stored here or returned in ConnectionDTO.
+ */
+export interface SSHConfig {
+    "enabled": boolean;
+    "host"?: string;
+    "port"?: number;
+    "username"?: string;
+
+    /**
+     * password | key | agent
+     */
+    "authMethod"?: string;
+    "privateKeyPath"?: string;
+    "saveCredential": boolean;
+}
+
+/**
+ * SSHHostKeyChallenge describes an unverified or changed SSH host key presented during handshake.
+ */
+export interface SSHHostKeyChallenge {
+    "hostPort": string;
+    "algorithm": string;
+    "fingerprint": string;
+    "mismatch": boolean;
+    "previousFingerprint"?: string;
+}
+
+/**
  * SaveConnectionRequest is sent from frontend to create or update a connection.
  * When UpdatePassword is false on edit, existing stored password is kept untouched.
  */
@@ -415,6 +473,29 @@ export interface SaveConnectionRequest {
     "params": ConnectionParams;
     "password"?: string;
     "updatePassword": boolean;
+    "sshPassword"?: string;
+    "updateSshPassword"?: boolean;
+    "sshPassphrase"?: string;
+    "updateSshPassphrase"?: boolean;
+}
+
+/**
+ * SchemaChanges summarizes backend-verified structural DDL mutations so the UI can refresh
+ * affected Explorer nodes and invalidate stale caches without opening unnecessary DB connections.
+ */
+export interface SchemaChanges {
+    "databasesChanged"?: boolean;
+    "droppedDatabases"?: string[] | null;
+    "changedSchemas"?: string[] | null;
+    "changedObjects"?: SchemaObjectScope[] | null;
+}
+
+/**
+ * SchemaObjectScope identifies one (database, schema) object container whose tables/views/sequences changed.
+ */
+export interface SchemaObjectScope {
+    "database": string;
+    "schema"?: string;
 }
 
 /**
@@ -433,6 +514,17 @@ export enum SessionState {
     SessionLost = "session_lost",
     SessionCommitUnknown = "commit_outcome_unknown",
 };
+
+/**
+ * SessionStateEvent is emitted asynchronously over the Wails event bus whenever a tab's
+ * physical session state changes in the background (e.g. SSH tunnel disconnect).
+ */
+export interface SessionStateEvent {
+    "tabId": string;
+    "connectionId": string;
+    "sessionState": SessionState;
+    "sessionEpoch": number;
+}
 
 /**
  * StatementResult represents the outcome of one executed statement in a query batch.
@@ -479,8 +571,11 @@ export interface TabSessionInfo {
     "currentDb": string;
     "currentSchema"?: string;
     "sessionState": SessionState;
+    "sessionEpoch"?: number;
     "serverConnId"?: string;
     "readOnly": boolean;
+    "credentialSaved"?: boolean;
+    "saveWarning"?: string;
 }
 
 /**

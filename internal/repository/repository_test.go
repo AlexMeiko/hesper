@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/entity"
+	"hesper/internal/entity"
 )
 
 func TestLocalDB_CRUDHistoryKVAndEmbeddedSQLiteVersion(t *testing.T) {
@@ -97,8 +97,8 @@ func TestBuildLocalFileURI_CrossPlatform(t *testing.T) {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(5000)")
 
-	gotWin := buildLocalFileURI("C:/Users/Alex #1/AppData/Roaming/sql-manager/app.db", q)
-	if !strings.HasPrefix(gotWin, "file:///C:/Users/Alex%20%231/AppData/Roaming/sql-manager/app.db?") {
+	gotWin := buildLocalFileURI("C:/Users/Alex #1/AppData/Roaming/hesper/app.db", q)
+	if !strings.HasPrefix(gotWin, "file:///C:/Users/Alex%20%231/AppData/Roaming/hesper/app.db?") {
 		t.Fatalf("unexpected Windows local DB URI: %q", gotWin)
 	}
 	parsed, err := url.Parse(gotWin)
@@ -106,8 +106,8 @@ func TestBuildLocalFileURI_CrossPlatform(t *testing.T) {
 		t.Fatalf("expected empty authority for Windows local DB URI, got parsed=%+v err=%v", parsed, err)
 	}
 
-	gotUnix := buildLocalFileURI("/home/demo/.config/sql-manager/app.db", q)
-	if !strings.HasPrefix(gotUnix, "file:///home/demo/.config/sql-manager/app.db?") {
+	gotUnix := buildLocalFileURI("/home/demo/.config/hesper/app.db", q)
+	if !strings.HasPrefix(gotUnix, "file:///home/demo/.config/hesper/app.db?") {
 		t.Fatalf("unexpected Unix local DB URI: %q", gotUnix)
 	}
 }

@@ -29,15 +29,20 @@ const (
 // AppError is a structured domain error carrying machine-readable code, user-facing message,
 // raw database error details, and optional SQL position metadata.
 type AppError struct {
-	Code       ErrorCode    `json:"code"`
-	Message    string       `json:"message"`
-	Detail     string       `json:"detail,omitempty"`
-	SQLState   string       `json:"sqlState,omitempty"`
-	Line       int          `json:"line,omitempty"`
-	Column     int          `json:"column,omitempty"`
-	Position   int          `json:"position,omitempty"`
-	RetrySafe  bool         `json:"retrySafe"`
-	Session    SessionState `json:"sessionState,omitempty"`
+	Code             ErrorCode            `json:"code"`
+	Message          string               `json:"message"`
+	Detail           string               `json:"detail,omitempty"`
+	SQLState         string               `json:"sqlState,omitempty"`
+	Line             int                  `json:"line,omitempty"`
+	Column           int                  `json:"column,omitempty"`
+	Position         int                  `json:"position,omitempty"`
+	RetrySafe        bool                 `json:"retrySafe"`
+	Session          SessionState         `json:"sessionState,omitempty"`
+	SessionEpoch     int64                `json:"sessionEpoch,omitempty"`
+	HostKeyChallenge *SSHHostKeyChallenge `json:"hostKeyChallenge,omitempty"`
+	SSHAuthPrompt    *SSHAuthPrompt       `json:"sshAuthPrompt,omitempty"`
+	CredentialSaved  bool                 `json:"credentialSaved,omitempty"`
+	SaveWarning      string               `json:"saveWarning,omitempty"`
 }
 
 func (e *AppError) Error() string {

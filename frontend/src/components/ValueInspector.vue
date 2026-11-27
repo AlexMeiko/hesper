@@ -105,7 +105,7 @@ async function copyContent() {
     const isPreviewOnly = Boolean(item.value.cell.truncated && !fullText.value)
     uiStore.notify(
       isPreviewOnly ? 'warning' : 'success',
-      isPreviewOnly ? '已复制预览文本（后端截断）' : '已复制完整原文',
+      isPreviewOnly ? '已复制预览文本 (后端截断)' : '已复制完整原文',
     )
   }
 }
@@ -128,9 +128,9 @@ async function copyContent() {
       >
         <div class="flex items-center gap-1.5 text-[11px] text-ink-muted">
           <span>只读预览</span>
-          <span v-if="isEmptyStringCell(item.cell)">· 空字符串（长度 0，非 NULL）</span>
+          <span v-if="isEmptyStringCell(item.cell)">· 空字符串 (长度 0，非 NULL)</span>
           <span v-else-if="item.cell.truncated && !fullText" class="text-warning">
-            · 当前仅展示截断预览{{ item.cell.streamRef ? '' : '（无流式原文句柄）' }}
+            · 当前仅展示截断预览{{ item.cell.streamRef ? '' : ' (无流式原文句柄)' }}
           </span>
         </div>
 
@@ -194,7 +194,7 @@ async function copyContent() {
         v-else-if="isEmptyStringCell(item.cell)"
         class="py-8 text-center font-mono-tabular text-xs text-ink-faint"
       >
-        ""（空字符串，长度为 0，与 NULL 不同）
+        "" (空字符串，长度为 0，与 NULL 不同)
       </div>
 
       <pre

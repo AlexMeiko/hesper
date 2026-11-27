@@ -2,14 +2,11 @@ package mysql
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,8 +16,8 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 const (
@@ -117,7 +114,7 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	mc.AllowNativePasswords = true
 	mc.CheckConnLiveness = true
 
-	if err := configureTLS(mc, cfg.TLS, token); err != nil {
+	if err := configureTLS(mc, cfg.TLS, host); err != nil {
 		return nil, err
 	}
 
@@ -179,51 +176,16 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	}, nil
 }
 
-func configureTLS(mc *mysqldriver.Config, tlsCfg dto.TLSConfig, token string) error {
-	mode := strings.ToLower(strings.TrimSpace(tlsCfg.Mode))
-	switch mode {
-	case "", "disable":
-		mc.TLSConfig = "false"
-		return nil
-	case "prefer":
-		mc.TLSConfig = "preferred"
-		return nil
-	case "require":
-		mc.TLSConfig = "skip-verify"
-		return nil
-	case "verify-ca", "verify-full":
-		tc := &tls.Config{MinVersion: tls.VersionTLS12}
-		if mode == "verify-ca" {
-			tc.InsecureSkipVerify = true
-		}
-		if tlsCfg.CACertPath != "" {
-			pemBytes, err := os.ReadFile(tlsCfg.CACertPath)
-			if err != nil {
-				return fmt.Errorf("read tls ca cert: %w", err)
-			}
-			pool := x509.NewCertPool()
-			if !pool.AppendCertsFromPEM(pemBytes) {
-				return errors.New("invalid tls ca certificate pem")
-			}
-			tc.RootCAs = pool
-		}
-		if tlsCfg.CertPath != "" && tlsCfg.KeyPath != "" {
-			cert, err := tls.LoadX509KeyPair(tlsCfg.CertPath, tlsCfg.KeyPath)
-			if err != nil {
-				return fmt.Errorf("load tls client keypair: %w", err)
-			}
-			tc.Certificates = []tls.Certificate{cert}
-		}
-		name := "sqlm-tls-" + token
-		if err := mysqldriver.RegisterTLSConfig(name, tc); err != nil {
-			return err
-		}
-		mc.TLSConfig = name
-		return nil
-	default:
-		mc.TLSConfig = "preferred"
-		return nil
+func configureTLS(mc *mysqldriver.Config, tlsCfg dto.TLSConfig, host string) error {
+	tc, err := driver.BuildTLSConfig(tlsCfg, host)
+	if err != nil {
+		return err
 	}
+	mode := driver.NormalizeTLSMode(tlsCfg.Mode)
+	mc.TLSConfig = ""
+	mc.TLS = tc
+	mc.AllowFallbackToPlaintext = (mode == "prefer")
+	return nil
 }
 
 // Conn represents one dedicated physical MySQL / MariaDB connection.
@@ -1069,7 +1031,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 		case 1142, 1143, 1227, 1290, 1792:
 			return &dto.AppError{
 				Code:     dto.ErrReadOnlyDenied,
-				Message:  "数据库拒绝写入操作（只读权限或只读事务限制）",
+				Message:  "数据库拒绝写入操作 (只读权限或只读事务限制)",
 				Detail:   me.Message,
 				SQLState: string(me.SQLState[:]),
 			}
@@ -1093,7 +1055,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 	if errors.Is(err, mysqldriver.ErrInvalidConn) || strings.Contains(lower, "bad connection") || strings.Contains(lower, "eof") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "broken pipe") {
 		return &dto.AppError{
 			Code:    dto.ErrSessionLost,
-			Message: "数据库连接已断开，原会话已结束（临时表与未提交事务已失效）",
+			Message: "数据库连接已断开，原会话已结束 (临时表与未提交事务已失效)",
 			Detail:  err.Error(),
 		}
 	}

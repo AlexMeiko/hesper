@@ -2,10 +2,12 @@ package service
 
 import (
 	"context"
+	"errors"
+	"strings"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/session"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/session"
 )
 
 // SchemaService uses Track A (independent metadata pool) to browse databases, schemas, tables, views,
@@ -20,16 +22,40 @@ func NewSchemaService(sessMgr *session.Manager) *SchemaService {
 
 func (s *SchemaService) ListDatabases(ctx context.Context, connID string) ([]dto.DatabaseInfo, error) {
 	var out []dto.DatabaseInfo
-	err := s.sessMgr.WithMetaConn(ctx, connID, "", func(conn driver.Conn) error {
-		insp, ok := conn.(driver.MetaInspector)
-		if !ok {
-			return dto.NewAppError(dto.ErrUnsupported, "当前驱动不支持数据库列表浏览", "")
+	runList := func(db string) error {
+		return s.sessMgr.WithMetaConn(ctx, connID, db, func(conn driver.Conn) error {
+			insp, ok := conn.(driver.MetaInspector)
+			if !ok {
+				return dto.NewAppError(dto.ErrUnsupported, "当前驱动不支持数据库列表浏览", "")
+			}
+			var err error
+			out, err = insp.ListDatabases(ctx)
+			return err
+		})
+	}
+	err := runList("")
+	if err != nil {
+		var ae *dto.AppError
+		if errors.As(err, &ae) {
+			if ae.SQLState == "3D000" {
+				// Configured defaultDatabase was dropped (PostgreSQL invalid_catalog_name): fall back to maintenance DB.
+				err = runList("postgres")
+			} else if isMySQLUnknownDatabaseErr(ae) {
+				// Configured defaultDatabase was dropped (MySQL/MariaDB 1049): fall back to built-in information_schema.
+				err = runList("information_schema")
+			}
 		}
-		var err error
-		out, err = insp.ListDatabases(ctx)
-		return err
-	})
+	}
 	return out, wrapErr(err, dto.ErrInternal, "获取数据库列表失败")
+}
+
+func isMySQLUnknownDatabaseErr(ae *dto.AppError) bool {
+	if ae == nil || ae.SQLState != "42000" {
+		return false
+	}
+	return strings.Contains(ae.Message, "(1049)") ||
+		strings.Contains(strings.ToLower(ae.Detail), "unknown database") ||
+		strings.Contains(strings.ToLower(ae.Message), "unknown database")
 }
 
 func (s *SchemaService) ListSchemas(ctx context.Context, connID, db string) ([]string, error) {

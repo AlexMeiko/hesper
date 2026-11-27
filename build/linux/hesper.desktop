@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hesper
+GenericName=Database Client
+Comment=Lightweight cross-platform desktop database workbench for MySQL, PostgreSQL, MariaDB & SQLite
+Exec=hesper %U
+Icon=hesper
+Terminal=false
+Categories=Development;Database;
+StartupWMClass=hesper
+Keywords=SQL;MySQL;PostgreSQL;MariaDB;SQLite;Database;Client;Workbench;

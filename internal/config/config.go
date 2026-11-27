@@ -6,7 +6,7 @@ import (
 	"runtime"
 )
 
-const AppName = "sql-manager"
+const AppName = "hesper"
 
 // Paths holds resolved OS-appropriate local directories for app.db, result snapshots, and logs.
 type Paths struct {
@@ -21,7 +21,7 @@ type Paths struct {
 
 // ResolvePaths computes XDG / AppData / Portable directories and ensures they exist.
 func ResolvePaths() (Paths, error) {
-	if customRoot := os.Getenv("SQL_MANAGER_DATA_DIR"); customRoot != "" {
+	if customRoot := os.Getenv("HESPER_DATA_DIR"); customRoot != "" {
 		return ensurePaths(customRoot, customRoot, customRoot, false)
 	}
 

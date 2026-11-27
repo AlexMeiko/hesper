@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/mysql"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
+	"hesper/internal/driver"
+	"hesper/internal/driver/mysql"
+	"hesper/internal/dto"
+	"hesper/internal/resultbuf"
+	"hesper/internal/service"
+	"hesper/internal/session"
 )
 
 type mariaDropAfterWriteConn struct {
