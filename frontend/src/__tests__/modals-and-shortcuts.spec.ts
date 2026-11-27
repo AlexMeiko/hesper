@@ -8,6 +8,7 @@ import CommandPalette from '@/components/CommandPalette.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import ConnectionModal from '@/components/ConnectionModal.vue'
 import SettingsModal from '@/components/SettingsModal.vue'
+import TopBar from '@/components/TopBar.vue'
 import { useShortcuts } from '@/composables/useShortcuts'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
@@ -328,5 +329,72 @@ describe('4-engine workbench & settings modals (MySQL, PostgreSQL, MariaDB, SQLi
     expect(settings.fontScale).toBe('compact')
     expect(localStorage.getItem('sqlm:fontScale')).toBe('compact')
     expect(document.documentElement.getAttribute('data-font-scale')).toBe('compact')
+  })
+
+  it('renders VS Code-style frameless window controls next to Settings only in desktop webview mode', async () => {
+    // 1. Browser / non-desktop mode: controls hidden, header dblclick is a no-op
+    vi.spyOn(api, 'hasDesktopWindowControls').mockReturnValue(false)
+    const toggleNoopSpy = vi.spyOn(api, 'windowToggleMaximise').mockResolvedValue(false)
+    const browserWrapper = mount(TopBar)
+    expect(browserWrapper.find('[data-testid="window-controls"]').exists()).toBe(false)
+    await browserWrapper.find('header').trigger('dblclick')
+    expect(toggleNoopSpy).not.toHaveBeenCalled()
+    browserWrapper.unmount()
+
+    // 2. Desktop webview mode: controls appear right after Settings and wire all actions
+    vi.restoreAllMocks()
+    vi.spyOn(api, 'hasDesktopWindowControls').mockReturnValue(true)
+    const minimiseSpy = vi.spyOn(api, 'windowMinimise').mockResolvedValue(undefined)
+    const toggleSpy = vi.spyOn(api, 'windowToggleMaximise').mockResolvedValue(true)
+    const closeSpy = vi.spyOn(api, 'windowClose').mockResolvedValue(undefined)
+    const unsubSpy = vi.fn()
+    const maxCallbacks: Array<(maximised: boolean) => void> = []
+    vi.spyOn(api, 'onWindowMaximiseChanged').mockImplementation((cb) => {
+      maxCallbacks.push(cb)
+      return unsubSpy
+    })
+
+    const wrapper = mount(TopBar)
+    const settingsBtn = wrapper.find('[data-testid="open-settings-btn"]')
+    const controls = wrapper.find('[data-testid="window-controls"]')
+    expect(settingsBtn.exists()).toBe(true)
+    expect(controls.exists()).toBe(true)
+    // Verify window controls follow Settings button in document order
+    expect(
+      settingsBtn.element.compareDocumentPosition(controls.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+
+    const minBtn = wrapper.find('[data-testid="window-minimize-btn"]')
+    const maxBtn = wrapper.find('[data-testid="window-maximize-btn"]')
+    const closeBtn = wrapper.find('[data-testid="window-close-btn"]')
+    expect(maxBtn.attributes('title')).toBe('最大化')
+
+    await minBtn.trigger('click')
+    expect(minimiseSpy).toHaveBeenCalledTimes(1)
+
+    await maxBtn.trigger('click')
+    await nextTick()
+    expect(toggleSpy).toHaveBeenCalledTimes(1)
+    expect(maxBtn.attributes('title')).toBe('还原')
+
+    // OS window restore event resets icon back to 最大化
+    expect(maxCallbacks).toHaveLength(1)
+    maxCallbacks.forEach((cb) => cb(false))
+    await nextTick()
+    expect(maxBtn.attributes('title')).toBe('最大化')
+
+    // Double-clicking a button inside header does NOT toggle maximize
+    await settingsBtn.trigger('dblclick')
+    expect(toggleSpy).toHaveBeenCalledTimes(1)
+
+    // Double-clicking empty header area DOES toggle maximize
+    await wrapper.find('header').trigger('dblclick')
+    expect(toggleSpy).toHaveBeenCalledTimes(2)
+
+    await closeBtn.trigger('click')
+    expect(closeSpy).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    expect(unsubSpy).toHaveBeenCalledTimes(1)
   })
 })

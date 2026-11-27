@@ -123,6 +123,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 		Height:           860,
 		MinWidth:         960,
 		MinHeight:        640,
+		Frameless:        true,
 		BackgroundColour: application.NewRGB(248, 250, 252),
 		URL:              "/",
 	})

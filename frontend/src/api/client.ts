@@ -264,6 +264,59 @@ export const api = {
     }
   },
 
+  // --- Desktop Frameless Window Controls ---
+  hasDesktopWindowControls(): boolean {
+    if (typeof window === 'undefined') return false
+    const w = window as unknown as {
+      chrome?: { webview?: { postMessage?: unknown } }
+      webkit?: { messageHandlers?: { external?: { postMessage?: unknown } } }
+    }
+    return Boolean(w.chrome?.webview?.postMessage || w.webkit?.messageHandlers?.external?.postMessage)
+  },
+  async windowMinimise(): Promise<void> {
+    if (!api.hasDesktopWindowControls()) return
+    const { Window } = await import('@wailsio/runtime')
+    await Window.Minimise()
+  },
+  async windowToggleMaximise(): Promise<boolean> {
+    if (!api.hasDesktopWindowControls()) return false
+    const { Window } = await import('@wailsio/runtime')
+    await Window.ToggleMaximise()
+    return Boolean(await Window.IsMaximised())
+  },
+  async windowClose(): Promise<void> {
+    if (!api.hasDesktopWindowControls()) return
+    const { Window } = await import('@wailsio/runtime')
+    await Window.Close()
+  },
+  onWindowMaximiseChanged(handler: (maximised: boolean) => void): () => void {
+    if ((import.meta as { env?: { MODE?: string } }).env?.MODE === 'test' || !api.hasDesktopWindowControls()) {
+      return () => {}
+    }
+    let canceled = false
+    const unsubs: Array<() => void> = []
+    void import('@wailsio/runtime')
+      .then(({ Events, Window }) => {
+        if (canceled) return
+        void Window.IsMaximised()
+          .then((m) => {
+            if (!canceled) handler(Boolean(m))
+          })
+          .catch(() => {})
+        unsubs.push(
+          Events.On(Events.Types.Common.WindowMaximise, () => handler(true)),
+          Events.On(Events.Types.Common.WindowUnMaximise, () => handler(false)),
+          Events.On(Events.Types.Common.WindowRestore, () => handler(false)),
+        )
+      })
+      .catch(() => {})
+    return () => {
+      canceled = true
+      for (const u of unsubs) u()
+      unsubs.length = 0
+    }
+  },
+
   // --- Binary / Oversized Stream URL ---
   streamUrl,
 }

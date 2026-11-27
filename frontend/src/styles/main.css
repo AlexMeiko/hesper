@@ -418,6 +418,43 @@
     background: var(--accent);
     height: 2px;
   }
+
+  /* Custom frameless desktop titlebar (VS Code style) */
+  .titlebar-drag {
+    --wails-draggable: drag;
+  }
+
+  .titlebar-no-drag,
+  .titlebar-drag button,
+  .titlebar-drag input,
+  .titlebar-drag select,
+  .titlebar-drag a {
+    --wails-draggable: no-drag;
+  }
+
+  .window-ctrl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    outline: none;
+    transition: background-color 0.1s ease, color 0.1s ease;
+  }
+
+  .window-ctrl-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .window-ctrl-close:hover {
+    background: #e81123;
+    color: #ffffff;
+  }
 }
 
 /* CodeMirror overrides */
