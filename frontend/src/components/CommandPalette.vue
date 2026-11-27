@@ -39,7 +39,7 @@ const entries = computed<PaletteEntry[]>(() => {
       id: 'act-settings',
       kind: 'action',
       label: '打开偏好设置',
-      sub: '调整亮暗色主题（跟随系统/亮色/暗色）与界面字号',
+      sub: '调整亮暗色主题 (跟随系统/亮色/暗色) 与界面字号',
       run: () => uiStore.openSettingsModal(),
     },
     {

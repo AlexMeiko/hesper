@@ -87,7 +87,7 @@ type HostKeyChallengeError struct {
 
 func (e *HostKeyChallengeError) Error() string {
 	if e.Mismatch {
-		return fmt.Sprintf("SSH 主机 %s 的指纹已变更（原: %s，现: %s）", e.HostPort, e.PreviousFingerprint, e.Fingerprint)
+		return fmt.Sprintf("SSH 主机 %s 的指纹已变更 (原: %s，现: %s)", e.HostPort, e.PreviousFingerprint, e.Fingerprint)
 	}
 	return fmt.Sprintf("首次连接 SSH 主机 %s，需确认主机指纹 %s", e.HostPort, e.Fingerprint)
 }

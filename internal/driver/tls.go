@@ -50,7 +50,7 @@ func ValidateTLSConfig(cfg dto.TLSConfig) *dto.AppError {
 		if caPath != "" || certPath != "" || keyPath != "" {
 			return dto.NewAppError(
 				dto.ErrInvalidArgument,
-				"TLS 关闭（disable）模式下不能配置 CA 证书或客户端证书",
+				"TLS 关闭 (disable) 模式下不能配置 CA 证书或客户端证书",
 				"certificate paths are not permitted when tls.mode=disable",
 			)
 		}

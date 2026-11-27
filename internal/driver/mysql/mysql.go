@@ -1031,7 +1031,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 		case 1142, 1143, 1227, 1290, 1792:
 			return &dto.AppError{
 				Code:     dto.ErrReadOnlyDenied,
-				Message:  "数据库拒绝写入操作（只读权限或只读事务限制）",
+				Message:  "数据库拒绝写入操作 (只读权限或只读事务限制)",
 				Detail:   me.Message,
 				SQLState: string(me.SQLState[:]),
 			}
@@ -1055,7 +1055,7 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 	if errors.Is(err, mysqldriver.ErrInvalidConn) || strings.Contains(lower, "bad connection") || strings.Contains(lower, "eof") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "broken pipe") {
 		return &dto.AppError{
 			Code:    dto.ErrSessionLost,
-			Message: "数据库连接已断开，原会话已结束（临时表与未提交事务已失效）",
+			Message: "数据库连接已断开，原会话已结束 (临时表与未提交事务已失效)",
 			Detail:  err.Error(),
 		}
 	}

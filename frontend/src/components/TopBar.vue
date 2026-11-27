@@ -98,7 +98,7 @@ const activeContext = computed(() => {
         type="button"
         data-testid="open-settings-btn"
         class="btn btn-ghost btn-icon"
-        title="偏好设置（外观主题与界面字号，Ctrl+,）"
+        title="偏好设置 (外观主题与界面字号，Ctrl+,)"
         @click="uiStore.openSettingsModal()"
       >
         <Settings class="w-4 h-4" />

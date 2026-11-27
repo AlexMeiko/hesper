@@ -365,7 +365,7 @@ function copyAsCSV() {
 
 function copyAsJSON() {
   const { cols, rows } = getTargetRowsAndCols()
-  void writeClipboardWithFidelity(rowsToJSON(cols, rows), '已复制为 JSON（大数保真）', cols, rows, 'json')
+  void writeClipboardWithFidelity(rowsToJSON(cols, rows), '已复制为 JSON (大数保真)', cols, rows, 'json')
 }
 
 function copyAsInsert() {
@@ -579,7 +579,7 @@ function singleCellLengthLabel(cell: CellValue): string {
           data-testid="toggle-whitespace-btn"
           class="btn btn-sm"
           :class="settings.showWhitespace ? 'btn-active' : 'btn-ghost'"
-          title="显示/隐藏不可见字符（空格 · / 制表符 → / 换行 ↵ / 零宽字符），不影响复制原文"
+          title="显示/隐藏不可见字符 (空格 · / 制表符 → / 换行 ↵ / 零宽字符)，不影响复制原文"
           @click="settings.toggleWhitespace()"
         >
           <Pilcrow class="w-3.5 h-3.5" />
@@ -628,28 +628,28 @@ function singleCellLengthLabel(cell: CellValue): string {
               class="w-full text-left px-3 py-1.5 text-xs text-ink hover:bg-subtle cursor-pointer border-0 bg-transparent"
               @click="copyAsTSV"
             >
-              复制为 TSV（换行/制表符转空格）
+              复制为 TSV (换行/制表符转空格)
             </button>
             <button
               type="button"
               class="w-full text-left px-3 py-1.5 text-xs text-ink hover:bg-subtle cursor-pointer border-0 bg-transparent"
               @click="copyAsCSV"
             >
-              复制为 CSV（NULL 与空串均为空）
+              复制为 CSV (NULL 与空串均为空)
             </button>
             <button
               type="button"
               class="w-full text-left px-3 py-1.5 text-xs text-ink hover:bg-subtle cursor-pointer border-0 bg-transparent"
               @click="copyAsJSON"
             >
-              复制为 JSON（大数保真）
+              复制为 JSON (大数保真)
             </button>
             <button
               type="button"
               class="w-full text-left px-3 py-1.5 text-xs text-ink hover:bg-subtle cursor-pointer border-0 bg-transparent"
               @click="copyAsInsert"
             >
-              复制为 INSERT SQL（按方言引用）
+              复制为 INSERT SQL (按方言引用)
             </button>
           </div>
         </div>

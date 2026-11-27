@@ -895,7 +895,7 @@ func classifyPGError(err error, reportedCharset, fallbackCharset string) *dto.Ap
 		case "25006", "42501": // read_only_sql_transaction / insufficient_privilege
 			return &dto.AppError{
 				Code:     dto.ErrReadOnlyDenied,
-				Message:  "数据库拒绝写入操作（只读权限或只读事务限制）",
+				Message:  "数据库拒绝写入操作 (只读权限或只读事务限制)",
 				Detail:   pgErr.Message,
 				SQLState: pgErr.Code,
 			}

@@ -264,7 +264,7 @@ describe('4-engine workbench & settings modals (MySQL, PostgreSQL, MariaDB, SQLi
     expect(wrapper.text()).toContain('主机地址 (Host)')
     expect(wrapper.text()).toContain('TLS 加密模式')
     expect(wrapper.text()).toContain('客户端只读保护')
-    expect(wrapper.text()).not.toContain('连接报错编码（可选）')
+    expect(wrapper.text()).not.toContain('连接报错编码 (可选)')
 
     await testBtn.trigger('click')
     expect(testSpy.mock.calls[1][0].params.errorCharset).toBeUndefined()

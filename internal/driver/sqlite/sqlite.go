@@ -497,7 +497,7 @@ func (c *Conn) InspectTableEditability(ctx context.Context, db, _, table string,
 		StorageEngine:      "SQLite",
 	}
 	if clientReadOnly || c.readOnly {
-		edit.Reasons = append(edit.Reasons, "连接已启用只读模式（mode=ro / query_only）")
+		edit.Reasons = append(edit.Reasons, "连接已启用只读模式 (mode=ro / query_only)")
 	}
 
 	cols, pkCols, err := c.readColumns(ctx, db, table)
@@ -538,7 +538,7 @@ func (c *Conn) InspectTableEditability(ctx context.Context, db, _, table string,
 		}
 	}
 
-	edit.Reasons = append(edit.Reasons, "SQLite 表缺少显式主键或全列非空唯一键（禁止使用隐式 rowid 延迟定位行，因 VACUUM 会重排 rowid）")
+	edit.Reasons = append(edit.Reasons, "SQLite 表缺少显式主键或全列非空唯一键 (禁止使用隐式 rowid 延迟定位行，因 VACUUM 会重排 rowid)")
 	return edit, nil
 }
 

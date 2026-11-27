@@ -641,7 +641,7 @@ func normalizeAndValidateErrorCharset(engine dto.EngineType, raw string) (string
 		return "", nil
 	}
 	if driver.LookupCharset(trimmed) == nil {
-		return "", dto.NewAppError(dto.ErrInvalidArgument, fmt.Sprintf("不支持的报错编码：%s（例如 GBK、GB18030、Windows-1252）", trimmed), "")
+		return "", dto.NewAppError(dto.ErrInvalidArgument, fmt.Sprintf("不支持的报错编码：%s (例如 GBK、GB18030、Windows-1252)", trimmed), "")
 	}
 	return trimmed, nil
 }

@@ -48,7 +48,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
       <div class="flex items-start gap-2.5 min-w-0">
         <AlertOctagon class="w-4 h-4 shrink-0 mt-0.5" />
         <div class="space-y-0.5 min-w-0">
-          <div class="font-semibold text-[13px]">写入或提交结果未知（请勿自动重试）</div>
+          <div class="font-semibold text-[13px]">写入或提交结果未知 (请勿自动重试)</div>
           <p class="m-0 leading-relaxed opacity-95">
             {{
               error?.message ||
@@ -171,7 +171,7 @@ const isReadOnlyDenied = computed(() => props.error?.code === ErrorCode.ErrReadO
       <div class="flex items-center gap-2 min-w-0">
         <Info class="w-4 h-4 shrink-0" />
         <span>
-          {{ expiredMessage || '该次查询快照已过期（翻页不会自动重跑原 SQL，以避免重复产生副作用）。' }}
+          {{ expiredMessage || '该次查询快照已过期 (翻页不会自动重跑原 SQL，以避免重复产生副作用)。' }}
         </span>
       </div>
       <button type="button" class="btn shrink-0" @click="emit('rerun-expired')">

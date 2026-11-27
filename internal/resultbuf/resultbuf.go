@@ -160,13 +160,13 @@ func (b *Builder) Append(row []dto.CellValue) (bool, error) {
 	opts := b.mgr.opts
 	if b.snap.totalRows >= opts.MaxTotalRows {
 		b.snap.truncatedByLimit = true
-		b.snap.limitReason = fmt.Sprintf("已达到预览行数上限（%d 行），如需完整数据请增加筛选条件或导出", opts.MaxTotalRows)
+		b.snap.limitReason = fmt.Sprintf("已达到预览行数上限 (%d 行)，如需完整数据请增加筛选条件或导出", opts.MaxTotalRows)
 		return false, nil
 	}
 	rowBytes := estimateRowBytes(row)
 	if b.snap.totalRows > 0 && b.snap.totalBytes+rowBytes > opts.MaxTotalBytes {
 		b.snap.truncatedByLimit = true
-		b.snap.limitReason = fmt.Sprintf("已达到预览容量上限（%d MiB），如需完整数据请缩小查询范围", opts.MaxTotalBytes/(1024*1024))
+		b.snap.limitReason = fmt.Sprintf("已达到预览容量上限 (%d MiB)，如需完整数据请缩小查询范围", opts.MaxTotalBytes/(1024*1024))
 		return false, nil
 	}
 

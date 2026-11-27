@@ -14,7 +14,7 @@ export type SSHChallengeOutcome<T> =
 export function buildHostKeyConfirmOptions(ch: SSHHostKeyChallenge): ConfirmOptions {
   if (ch.mismatch) {
     return {
-      title: 'SSH 主机指纹已变更（高危警示）',
+      title: 'SSH 主机指纹已变更 (高危警示)',
       message: `跳板机 ${ch.hostPort} 返回的主机密钥与历史记录不一致！这可能意味着存在中间人攻击，或跳板机重装了 SSH 服务。请先向运维确认后再决定是否信任。`,
       tone: 'danger',
       bullets: [

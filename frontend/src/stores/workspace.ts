@@ -158,7 +158,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } else if (evt.sessionState === SessionState.SessionLost) {
       banner = {
         code: ErrorCode.ErrSessionLost,
-        message: '后台检测到数据库连接或 SSH 隧道已断开（原会话未提交事务与临时表已失效），请点击重新连接建立新会话。',
+        message: '后台检测到数据库连接或 SSH 隧道已断开 (原会话未提交事务与临时表已失效)，请点击重新连接建立新会话。',
         retrySafe: false,
         sessionState: SessionState.SessionLost,
         sessionEpoch: evt.sessionEpoch,

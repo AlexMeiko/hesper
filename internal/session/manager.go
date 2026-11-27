@@ -611,7 +611,7 @@ func (ts *TabSession) EnsureConnected(ctx context.Context, targetDB, targetSchem
 	if st == dto.SessionLost || conn == nil {
 		return &dto.AppError{
 			Code:         dto.ErrSessionLost,
-			Message:      "原会话已结束（临时表与未提交事务已失效），请点击重新连接建立新会话",
+			Message:      "原会话已结束 (临时表与未提交事务已失效)，请点击重新连接建立新会话",
 			Session:      dto.SessionLost,
 			SessionEpoch: ep,
 		}
@@ -880,7 +880,7 @@ func (ts *TabSession) ExecuteStatement(
 			SessionEpoch: ep,
 			Error: &dto.AppError{
 				Code:         dto.ErrSessionLost,
-				Message:      "原会话已结束（临时表与未提交事务已失效），请重新连接后再执行",
+				Message:      "原会话已结束 (临时表与未提交事务已失效)，请重新连接后再执行",
 				Session:      dto.SessionLost,
 				SessionEpoch: ep,
 			},

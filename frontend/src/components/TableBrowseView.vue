@@ -96,7 +96,7 @@ function onGridCopied(notice: GridCopyNotice) {
             :value="tab.filterWhere"
             type="text"
             class="input-field input-field-sm w-full pl-8 font-mono-tabular"
-            placeholder="WHERE 过滤条件，例如 id > 10（按 Enter 应用）"
+            placeholder="WHERE 过滤条件，例如 id > 10 (按 Enter 应用)"
             @input="wsStore.setBrowseFilter(tab.id, ($event.target as HTMLInputElement).value)"
             @keydown.enter="wsStore.applyBrowseFilter(tab.id)"
           />

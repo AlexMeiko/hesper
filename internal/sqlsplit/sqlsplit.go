@@ -829,19 +829,19 @@ func inspectHighRiskTokens(tokens []sqlToken, baseDepth int, rawSQL string, dial
 
 	switch tokens[0].upper {
 	case "DROP":
-		*out = append(*out, HighRiskMatch{Kind: "drop", Label: "DROP（删除对象）", SQL: rawSQL})
+		*out = append(*out, HighRiskMatch{Kind: "drop", Label: "DROP (删除对象)", SQL: rawSQL})
 		return
 	case "TRUNCATE":
-		*out = append(*out, HighRiskMatch{Kind: "truncate", Label: "TRUNCATE（清空整表）", SQL: rawSQL})
+		*out = append(*out, HighRiskMatch{Kind: "truncate", Label: "TRUNCATE (清空整表)", SQL: rawSQL})
 		return
 	case "DELETE":
 		if !hasWordAtDepth(tokens[1:], baseDepth, "WHERE") {
-			*out = append(*out, HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE（全表删除）", SQL: rawSQL})
+			*out = append(*out, HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE (全表删除)", SQL: rawSQL})
 		}
 		return
 	case "UPDATE":
 		if !hasWordAtDepth(tokens[1:], baseDepth, "WHERE") {
-			*out = append(*out, HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE（全表更新）", SQL: rawSQL})
+			*out = append(*out, HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE (全表更新)", SQL: rawSQL})
 		}
 		return
 	case "WITH":
@@ -898,16 +898,16 @@ func inspectHighRiskFallback(tokens []sqlToken, rawSQL string, out *[]HighRiskMa
 		}
 		switch t.upper {
 		case "DROP":
-			addOnce(HighRiskMatch{Kind: "drop", Label: "DROP（删除对象）", SQL: rawSQL})
+			addOnce(HighRiskMatch{Kind: "drop", Label: "DROP (删除对象)", SQL: rawSQL})
 		case "TRUNCATE":
-			addOnce(HighRiskMatch{Kind: "truncate", Label: "TRUNCATE（清空整表）", SQL: rawSQL})
+			addOnce(HighRiskMatch{Kind: "truncate", Label: "TRUNCATE (清空整表)", SQL: rawSQL})
 		case "DELETE":
 			if !hasWordAtDepth(tokens[i+1:], t.depth, "WHERE") {
-				addOnce(HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE（全表删除）", SQL: rawSQL})
+				addOnce(HighRiskMatch{Kind: "delete_no_where", Label: "无 WHERE 条件的 DELETE (全表删除)", SQL: rawSQL})
 			}
 		case "UPDATE":
 			if !isLockingUpdateToken(tokens, i) && !hasWordAtDepth(tokens[i+1:], t.depth, "WHERE") {
-				addOnce(HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE（全表更新）", SQL: rawSQL})
+				addOnce(HighRiskMatch{Kind: "update_no_where", Label: "无 WHERE 条件的 UPDATE (全表更新)", SQL: rawSQL})
 			}
 		}
 	}

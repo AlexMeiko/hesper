@@ -290,8 +290,8 @@ async function onDelete(conn: ConnectionDTO) {
   const confirmed = await uiStore.requestConfirm({
     title: '删除连接配置',
     message: hasDirty
-      ? `确定删除连接「${conn.name}」吗？该连接下仍有运行中或未执行的查询标签将被一并关闭（不会影响目标数据库数据）。`
-      : `确定删除连接「${conn.name}」吗？（仅删除本地配置，不会影响目标数据库数据）`,
+      ? `确定删除连接「${conn.name}」吗？该连接下仍有运行中或未执行的查询标签将被一并关闭 (不会影响目标数据库数据)。`
+      : `确定删除连接「${conn.name}」吗？ (仅删除本地配置，不会影响目标数据库数据)`,
     tone: 'danger',
     confirmLabel: '删除连接',
     cancelLabel: '取消',

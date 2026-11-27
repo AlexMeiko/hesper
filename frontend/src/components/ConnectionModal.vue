@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { CheckCircle2, ChevronDown, ChevronRight, FolderOpen, KeyRound, Loader2, Lock, Shield, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, FolderOpen, KeyRound, Loader2, Lock, Shield, XCircle } from 'lucide-vue-next'
 import { api, parseAppError } from '@/api/client'
 import { EngineType, ErrorCode, type SaveConnectionRequest, type TestConnectionResult } from '@/api/types'
 import { useConnectionsStore } from '@/stores/connections'
@@ -49,7 +49,6 @@ const form = reactive({
   errorCharset: '',
 })
 
-const sshExpanded = ref(false)
 const testing = ref(false)
 const saving = ref(false)
 const pickingFile = ref('')
@@ -111,7 +110,6 @@ watch(
       form.updateSshPassphrase = false
       form.hasSavedSshPassword = Boolean(editing.hasSshPassword)
       form.hasSavedSshPassphrase = Boolean(editing.hasSshPassphrase)
-      sshExpanded.value = form.sshEnabled
 
       form.connectTimeoutS = editing.params.connectTimeoutS || 10
       form.errorCharset = editing.params.errorCharset || ''
@@ -146,7 +144,6 @@ watch(
       form.updateSshPassphrase = true
       form.hasSavedSshPassword = false
       form.hasSavedSshPassphrase = false
-      sshExpanded.value = false
 
       form.connectTimeoutS = 10
       form.errorCharset = ''
@@ -162,7 +159,6 @@ function onDriverChange(drv: EngineType) {
   formError.value = ''
   if (drv === EngineType.EngineSQLite) {
     form.sshEnabled = false
-    sshExpanded.value = false
   }
   if (!form.id) {
     const nextDefaultPort = defaultPortForEngine(drv)
@@ -440,7 +436,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
               v-model="form.filePath"
               type="text"
               class="input-field font-mono-tabular flex-1"
-              placeholder="例如 /path/to/database.db（支持 .db / .sqlite / .sqlite3）"
+              placeholder="例如 /path/to/database.db (支持 .db / .sqlite / .sqlite3)"
               required
             />
             <button
@@ -487,14 +483,14 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
               v-model="form.password"
               type="password"
               class="input-field font-mono-tabular"
-              :placeholder="form.id ? '••••••••（未修改）' : '输入密码'"
+              :placeholder="form.id ? '•••••••• (未修改)' : '输入密码'"
             />
           </label>
         </div>
 
         <div class="grid grid-cols-2 gap-3">
           <label class="flex flex-col gap-1 text-xs">
-            <span class="text-ink-secondary">默认数据库（可选）</span>
+            <span class="text-ink-secondary">默认数据库 (可选)</span>
             <input
               v-model="form.defaultDatabase"
               type="text"
@@ -522,11 +518,11 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
         >
           <div class="font-medium text-ink flex items-center gap-1.5">
             <Lock class="w-3.5 h-3.5 text-accent" />
-            <span>TLS 证书配置（{{ showTLSCa ? 'CA 校验 / 可选双向 mTLS' : '可选双向 mTLS 客户端证书' }}）</span>
+            <span>TLS 证书配置 ({{ showTLSCa ? 'CA 校验 / 可选双向 mTLS' : '可选双向 mTLS 客户端证书' }})</span>
           </div>
 
           <div v-if="showTLSCa" class="flex flex-col gap-1">
-            <span class="text-ink-secondary">CA 根证书路径（留空则使用系统根证书）</span>
+            <span class="text-ink-secondary">CA 根证书路径 (留空则使用系统根证书)</span>
             <div class="flex items-center gap-2">
               <input
                 v-model="form.tlsCaCertPath"
@@ -549,7 +545,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
 
           <div v-if="showTLSMtls" class="grid grid-cols-1 gap-2">
             <div class="flex flex-col gap-1">
-              <span class="text-ink-secondary">客户端证书路径（mTLS，可选）</span>
+              <span class="text-ink-secondary">客户端证书路径 (mTLS，可选)</span>
               <div class="flex items-center gap-2">
                 <input
                   v-model="form.tlsCertPath"
@@ -570,7 +566,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
               </div>
             </div>
             <div class="flex flex-col gap-1">
-              <span class="text-ink-secondary">客户端私钥路径（mTLS，与客户端证书成对填写）</span>
+              <span class="text-ink-secondary">客户端私钥路径 (mTLS，与客户端证书成对填写)</span>
               <div class="flex items-center gap-2">
                 <input
                   v-model="form.tlsKeyPath"
@@ -595,33 +591,26 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
 
         <!-- SSH Bastion Tunnel Section -->
         <div data-testid="ssh-tunnel-section" class="rounded-lg border border-border bg-surface overflow-hidden text-xs">
-          <div class="px-3 py-2.5 flex items-center justify-between gap-2">
-            <button
-              type="button"
-              class="flex items-center gap-1.5 font-medium text-ink bg-transparent border-0 p-0 cursor-pointer"
-              @click="sshExpanded = !sshExpanded"
-            >
-              <ChevronDown v-if="sshExpanded" class="w-3.5 h-3.5 text-ink-muted" />
-              <ChevronRight v-else class="w-3.5 h-3.5 text-ink-muted" />
+          <label class="px-3 py-2.5 flex items-center justify-between gap-2 cursor-pointer select-none">
+            <span class="flex items-center gap-1.5 font-medium text-ink">
               <KeyRound class="w-3.5 h-3.5 text-accent" />
-              <span>SSH 跳板机隧道（零本地端口占用）</span>
-            </button>
-            <label class="flex items-center gap-1.5 cursor-pointer select-none">
+              <span>SSH 隧道</span>
+            </span>
+            <span class="flex items-center gap-1.5">
               <input
                 v-model="form.sshEnabled"
                 type="checkbox"
                 data-testid="ssh-enabled-checkbox"
                 class="accent-accent"
-                @change="form.sshEnabled && (sshExpanded = true)"
               />
-              <span class="text-ink-secondary">启用 SSH 隧道</span>
-            </label>
-          </div>
+              <span class="text-ink-secondary">启用</span>
+            </span>
+          </label>
 
-          <div v-if="sshExpanded && form.sshEnabled" class="px-3 pb-3 pt-1 border-t border-border space-y-3">
+          <div v-if="form.sshEnabled" class="px-3 pb-3 pt-1 border-t border-border space-y-3">
             <div class="grid grid-cols-12 gap-2.5">
               <label class="col-span-8 flex flex-col gap-1">
-                <span class="text-ink-secondary">SSH 跳板机主机</span>
+                <span class="text-ink-secondary">SSH 主机</span>
                 <input
                   v-model="form.sshHost"
                   type="text"
@@ -688,17 +677,17 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
                   data-testid="ssh-save-credential-checkbox"
                   class="accent-accent"
                 />
-                <span class="text-ink font-medium">记住 SSH 密码（保存到系统钥匙串 / 加密库）</span>
+                <span class="text-ink font-medium">记住 SSH 密码 (保存到系统钥匙串 / 加密库)</span>
               </label>
 
               <label class="flex flex-col gap-1">
                 <span class="text-ink-secondary">
                   SSH 密码
                   <span v-if="!form.sshSaveCredential" class="text-[11px] text-ink-faint">
-                    （未勾选记住，保存时不落盘；仅用于当前测试，每次新建连接弹窗输入）
+                    (未勾选记住，保存时不落盘；仅用于当前测试，每次新建连接弹窗输入)
                   </span>
                   <span v-else-if="form.id && form.hasSavedSshPassword" class="text-[11px] text-ink-faint">
-                    （留空则保持已保存密码）
+                    (留空则保持已保存密码)
                   </span>
                 </span>
                 <input
@@ -708,7 +697,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
                   class="input-field font-mono-tabular"
                   :placeholder="
                     form.sshSaveCredential && form.id && form.hasSavedSshPassword
-                      ? '••••••••（未修改）'
+                      ? '•••••••• (未修改)'
                       : form.sshSaveCredential
                         ? '输入 SSH 登录密码'
                         : '测试连接可临时填写，保存时不存储'
@@ -749,17 +738,17 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
                   data-testid="ssh-save-credential-checkbox"
                   class="accent-accent"
                 />
-                <span class="text-ink font-medium">记住私钥口令（未加密私钥可留空）</span>
+                <span class="text-ink font-medium">记住私钥口令 (未加密私钥可留空)</span>
               </label>
 
               <label class="flex flex-col gap-1">
                 <span class="text-ink-secondary">
                   私钥口令 (Passphrase，可选)
                   <span v-if="!form.sshSaveCredential" class="text-[11px] text-ink-faint">
-                    （未勾选记住，保存时不落盘，需要时弹窗输入）
+                    (未勾选记住，保存时不落盘，需要时弹窗输入)
                   </span>
                   <span v-else-if="form.id && form.hasSavedSshPassphrase" class="text-[11px] text-ink-faint">
-                    （留空则保持已保存口令）
+                    (留空则保持已保存口令)
                   </span>
                 </span>
                 <input
@@ -769,7 +758,7 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
                   class="input-field font-mono-tabular"
                   :placeholder="
                     form.sshSaveCredential && form.id && form.hasSavedSshPassphrase
-                      ? '••••••••（未修改）'
+                      ? '•••••••• (未修改)'
                       : '若私钥无口令可留空'
                   "
                 />
@@ -778,13 +767,13 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
 
             <!-- SSH Agent Auth -->
             <div v-else class="rounded-md border border-border bg-canvas px-3 py-2 text-[11px] text-ink-muted leading-relaxed">
-              将自动连接本机 SSH Agent（Linux / macOS 使用 <code class="font-mono-tabular">SSH_AUTH_SOCK</code>，Windows 使用 OpenSSH Authentication Agent 命名管道）。
+              将自动连接本机 SSH Agent (Linux / macOS 使用 <code class="font-mono-tabular">SSH_AUTH_SOCK</code>，Windows 使用 OpenSSH Authentication Agent 命名管道)。
             </div>
           </div>
         </div>
 
         <label v-if="form.driver === EngineType.EnginePostgres" class="flex flex-col gap-1.5 text-xs">
-          <span class="text-ink-secondary">连接报错编码（可选）</span>
+          <span class="text-ink-secondary">连接报错编码 (可选)</span>
           <input v-model="form.errorCharset" type="text" class="input-field font-mono-tabular" placeholder="例如 GBK 或 Windows-1252" />
         </label>
       </template>
@@ -796,10 +785,10 @@ const envColors = ['default', 'green', 'amber', 'red'] as const
           <div class="font-medium text-ink flex items-center gap-1.5">
             <Shield class="w-3.5 h-3.5 text-warning" />
             <template v-if="isSQLite">
-              以只读模式打开文件（引擎级 mode=ro + query_only=ON）
+              以只读模式打开文件 (引擎级 mode=ro + query_only=ON)
             </template>
             <template v-else>
-              启用客户端只读保护（防误写提示与只读会话）
+              启用客户端只读保护 (防误写提示与只读会话)
             </template>
           </div>
           <div class="text-[11px] leading-relaxed text-ink-muted">

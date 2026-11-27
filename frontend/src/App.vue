@@ -110,7 +110,7 @@ onUnmounted(() => {
             <button
               type="button"
               class="ml-0.5 w-4 h-4 rounded flex items-center justify-center border-0 bg-transparent text-ink-secondary cursor-pointer opacity-60 hover:opacity-100 hover:bg-hover"
-              title="关闭标签页（同步释放该标签物理连接与快照缓存）"
+              title="关闭标签页 (同步释放该标签物理连接与快照缓存)"
               @click.stop="wsStore.closeTab(tab.id, { confirmDirty: true })"
             >
               <X class="w-3 h-3" />
@@ -162,33 +162,6 @@ onUnmounted(() => {
                     <FilePlus2 class="w-4 h-4" />
                     在「{{ connStore.connections[0].name }}」新建查询
                   </button>
-                </div>
-
-                <div class="rounded-xl border border-border bg-surface p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">双击表直接浏览</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      左侧展开库表后双击任意表即开启「实时浏览」；支持 WHERE 过滤、表头排序和结构/DDL 查看。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">编辑器执行一次 · 翻页读快照</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      按 Ctrl+Enter 运行当前语句，按 Esc 旁路停止；翻页只读第一次结果快照，绝不重复触发副作用。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">数值保真与 NULL 区分</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      BIGINT / DECIMAL 原样文本呈现不丢精度，NULL 与空串 "" 一眼可辨，BLOB 按需流式查看。
-                    </div>
-                  </div>
-                  <div class="space-y-1">
-                    <div class="font-medium text-ink">清晰会话状态与快捷键</div>
-                    <div class="text-[11px] leading-relaxed text-ink-muted">
-                      随时显示后端确认的会话状态；按 Ctrl+K 快速跳转、Ctrl+N 新建查询、Ctrl+W 关闭标签。
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>

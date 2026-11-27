@@ -52,7 +52,7 @@ describe('Query execution safeguards, editor UTF-8 offset & tab lifecycle', () =
           requiresConfirm: true,
           confirmToken: 'tok-delete-orders',
           highRiskStatements: [
-            { kind: 'delete_no_where', label: '无 WHERE 条件的 DELETE（全表删除）', sql: 'DELETE FROM orders' },
+            { kind: 'delete_no_where', label: '无 WHERE 条件的 DELETE (全表删除)', sql: 'DELETE FROM orders' },
           ],
         }
       }

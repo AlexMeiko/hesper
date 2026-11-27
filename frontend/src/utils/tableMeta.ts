@@ -54,9 +54,9 @@ export function formatEditabilitySummary(
   const parts: string[] = []
   if (editability.storageEngine) parts.push(editability.storageEngine)
   if (editability.rowIdentity === RowIdentityKind.RowIdentityPrimaryKey) {
-    parts.push(`主键(${(editability.keyColumns ?? []).join(', ')})`)
+    parts.push(`主键 (${(editability.keyColumns ?? []).join(', ')})`)
   } else if (editability.rowIdentity === RowIdentityKind.RowIdentityUniqueNotNull) {
-    parts.push(`非空唯一键(${(editability.keyColumns ?? []).join(', ')})`)
+    parts.push(`非空唯一键 (${(editability.keyColumns ?? []).join(', ')})`)
   } else {
     parts.push('无稳定唯一键')
   }

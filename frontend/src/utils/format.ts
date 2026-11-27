@@ -230,10 +230,10 @@ export function formatExportCaveat(
 ): string | undefined {
   const notes: string[] = []
   if (summary.truncatedCount > 0) {
-    notes.push(`含 ${summary.truncatedCount} 格超长文本预览（已截断，完整原文请双击单元格查看/下载）`)
+    notes.push(`含 ${summary.truncatedCount} 格超长文本预览 (已截断，完整原文请双击单元格查看/下载)`)
   }
   if (summary.binaryPreviewCount > 0) {
-    notes.push(`含 ${summary.binaryPreviewCount} 格 BLOB 十六进制预览（非原始二进制，完整字节请双击下载）`)
+    notes.push(`含 ${summary.binaryPreviewCount} 格 BLOB 十六进制预览 (非原始二进制，完整字节请双击下载)`)
   }
   if (format === 'tsv' && summary.hasTsvNormalizedWhitespace) {
     notes.push('TSV 已将单元格内制表符/换行转为空格以适配表格粘贴')
