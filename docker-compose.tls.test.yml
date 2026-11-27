@@ -2,7 +2,7 @@
 # Usage:
 #   ./scripts/gen-test-tls-certs.sh
 #   docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml up -d --wait
-#   SQLM_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/mysql ./internal/driver/postgres ./internal/service
+#   HESPER_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/mysql ./internal/driver/postgres ./internal/service
 #   docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml down -v
 
 services:

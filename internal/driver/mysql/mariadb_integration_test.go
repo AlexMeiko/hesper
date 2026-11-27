@@ -48,7 +48,7 @@ func (c *mariaDropAfterWriteConn) Read(p []byte) (int, error) {
 }
 
 func mariadbTestHostPort() (string, int) {
-	if addr := os.Getenv("SQLM_MARIADB_ADDR"); addr != "" {
+	if addr := os.Getenv("HESPER_TEST_MARIADB_ADDR"); addr != "" {
 		h, p, err := net.SplitHostPort(addr)
 		if err == nil {
 			if port, convErr := strconv.Atoi(p); convErr == nil {
@@ -64,8 +64,8 @@ func requireMariaDB114(t *testing.T) (string, int) {
 	host, port := mariadbTestHostPort()
 	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 1500*time.Millisecond)
 	if err != nil {
-		if os.Getenv("SQLM_REQUIRE_REAL_DB") == "1" {
-			t.Fatalf("real MariaDB 11.4 not reachable at %s:%d (SQLM_REQUIRE_REAL_DB=1): %v", host, port, err)
+		if os.Getenv("HESPER_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real MariaDB 11.4 not reachable at %s:%d (HESPER_REQUIRE_REAL_DB=1): %v", host, port, err)
 		}
 		t.Skipf("real MariaDB 11.4 not reachable at %s:%d (%v); run `docker compose -f docker-compose.test.yml up -d mariadb`", host, port, err)
 	}

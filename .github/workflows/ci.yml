@@ -3,14 +3,8 @@ name: CI
 on:
   push:
     branches: ["main"]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   pull_request:
     branches: ["main"]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   workflow_dispatch:
 
 permissions:
@@ -82,7 +76,7 @@ jobs:
 
       - name: Run Go unit, SQLite, and real DB integration tests (-race)
         env:
-          SQLM_REQUIRE_REAL_DB: "1"
+          HESPER_REQUIRE_REAL_DB: "1"
         run: go test -v -race -count=1 ./internal/...
 
       - name: Dump container logs on failure
