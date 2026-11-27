@@ -23,7 +23,8 @@ const (
 	KindQuery    StatementKind = "query"    // SELECT, SHOW, DESCRIBE, EXPLAIN, VALUES, TABLE, WITH ... SELECT
 	KindBegin    StatementKind = "begin"    // BEGIN, START TRANSACTION
 	KindCommit   StatementKind = "commit"   // COMMIT
-	KindRollback StatementKind = "rollback" // ROLLBACK
+	KindRollback            StatementKind = "rollback"              // ROLLBACK (full transaction rollback)
+	KindRollbackToSavepoint StatementKind = "rollback_to_savepoint" // ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] sp
 	KindUse      StatementKind = "use"      // USE db (MySQL)
 	KindSet      StatementKind = "set"      // SET ...
 	KindWrite    StatementKind = "write"    // INSERT, UPDATE, DELETE, REPLACE, MERGE, CALL, DO, LOAD
@@ -1014,6 +1015,12 @@ func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect
 	case "COMMIT", "END":
 		return KindCommit, first, false, false
 	case "ROLLBACK":
+		if second == "TO" || ((second == "WORK" || second == "TRANSACTION") && len(topWords) > 2 && topWords[2] == "TO") {
+			return KindRollbackToSavepoint, first, false, false
+		}
+		if second == "PREPARED" {
+			return KindOther, first, false, false
+		}
 		return KindRollback, first, false, false
 	case "USE":
 		return KindUse, first, false, false
