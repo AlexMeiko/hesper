@@ -39,6 +39,9 @@ func requireRealMySQL(t *testing.T) (string, int) {
 	host, port := mysqlHostPort()
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
 	if err != nil {
+		if os.Getenv("SQLM_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real MySQL 8.4 not reachable at %s:%d (SQLM_REQUIRE_REAL_DB=1): %v", host, port, err)
+		}
 		t.Skipf("real MySQL 8.4 not reachable at %s:%d (start with: docker compose -f docker-compose.test.yml up -d --wait): %v", host, port, err)
 	}
 	_ = c.Close()

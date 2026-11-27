@@ -64,6 +64,9 @@ func requireMariaDB114(t *testing.T) (string, int) {
 	host, port := mariadbTestHostPort()
 	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 1500*time.Millisecond)
 	if err != nil {
+		if os.Getenv("SQLM_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real MariaDB 11.4 not reachable at %s:%d (SQLM_REQUIRE_REAL_DB=1): %v", host, port, err)
+		}
 		t.Skipf("real MariaDB 11.4 not reachable at %s:%d (%v); run `docker compose -f docker-compose.test.yml up -d mariadb`", host, port, err)
 	}
 	_ = c.Close()

@@ -36,6 +36,9 @@ func requireRealPG(t *testing.T) {
 	host, port := pgHostPort()
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
 	if err != nil {
+		if os.Getenv("SQLM_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real PostgreSQL 16 not reachable at %s:%d (SQLM_REQUIRE_REAL_DB=1): %v", host, port, err)
+		}
 		t.Skipf("real PostgreSQL 16 not reachable at %s:%d: %v", host, port, err)
 	}
 	_ = c.Close()

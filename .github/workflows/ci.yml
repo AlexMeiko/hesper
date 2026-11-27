@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  pull_request:
+    branches: ["main"]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-and-compile:
+    name: Frontend & Compile Check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test & build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm build
+
+      - name: Verify Go cross-platform compilation
+        run: |
+          CGO_ENABLED=0 go build -tags server -o /tmp/hesper-server-check .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -tags production -o /tmp/hesper-win-check.exe .
+          rm -f /tmp/hesper-server-check /tmp/hesper-win-check.exe
+
+  go-and-real-db:
+    name: Go & Real DB Integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Generate ephemeral TLS test PKI
+        run: bash scripts/gen-test-tls-certs.sh
+
+      - name: Start MySQL 8.4, PostgreSQL 16, and MariaDB 11.4 (with TLS/mTLS)
+        run: docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml up -d --wait
+
+      - name: Run Go unit, SQLite, and real DB integration tests (-race)
+        env:
+          SQLM_REQUIRE_REAL_DB: "1"
+        run: go test -v -race -count=1 ./internal/...
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml ps
+          docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml logs --tail=200
+
+      - name: Tear down containers and ephemeral certs
+        if: always()
+        run: |
+          docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml down -v || true
+          rm -rf test/.tls-certs
