@@ -108,6 +108,21 @@ type StatementResult struct {
 	Error            *AppError     `json:"error,omitempty"`
 }
 
+// SchemaObjectScope identifies one (database, schema) object container whose tables/views/sequences changed.
+type SchemaObjectScope struct {
+	Database string `json:"database"`
+	Schema   string `json:"schema,omitempty"`
+}
+
+// SchemaChanges summarizes backend-verified structural DDL mutations so the UI can refresh
+// affected Explorer nodes and invalidate stale caches without opening unnecessary DB connections.
+type SchemaChanges struct {
+	DatabasesChanged bool                `json:"databasesChanged,omitempty"`
+	DroppedDatabases []string            `json:"droppedDatabases,omitempty"`
+	ChangedSchemas   []string            `json:"changedSchemas,omitempty"`
+	ChangedObjects   []SchemaObjectScope `json:"changedObjects,omitempty"`
+}
+
 // ExecuteSQLResponse carries all statement results and the authoritative post-execution SessionState.
 type ExecuteSQLResponse struct {
 	TabID              string              `json:"tabId"`
@@ -122,6 +137,7 @@ type ExecuteSQLResponse struct {
 	RequiresConfirm    bool                `json:"requiresConfirm,omitempty"`
 	ConfirmToken       string              `json:"confirmToken,omitempty"`
 	HighRiskStatements []HighRiskStatement `json:"highRiskStatements,omitempty"`
+	SchemaChanges      *SchemaChanges      `json:"schemaChanges,omitempty"`
 	Error              *AppError           `json:"error,omitempty"`
 }
 

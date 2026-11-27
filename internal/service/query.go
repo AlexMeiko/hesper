@@ -311,12 +311,20 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		ExecID:     execID,
 		Statements: make([]dto.StatementResult, 0, len(stmts)),
 	}
+	changes := newSchemaChangeCollector()
 
 	for idx, stmt := range stmts {
 		stmtRes := dto.StatementResult{
 			Index:     idx,
 			SQL:       stmt.Text,
 			StartLine: stmt.StartLine,
+		}
+
+		ddl := sqlsplit.InspectDDL(stmt.Text, dialect)
+		if ddl.IsDropDB && ddl.TargetName != "" && !ts.ReadOnly() && ts.State() == dto.SessionAliveIdle {
+			// Release Hesper's own Track A metadata pool connections targeting this DB so PG DROP DATABASE
+			// does not fail with SQLSTATE 55006 just because the user browsed the DB in Explorer.
+			s.sessMgr.CloseDatabaseMetaPool(connID, ddl.TargetName)
 		}
 
 		var snapID string
@@ -383,6 +391,45 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 			resp.Error = outcome.Error
 			break
 		}
+
+		// Record structural DDL effects (deferring transactional DDL until COMMIT succeeds).
+		if ddl.Scope != sqlsplit.DDLScopeNone {
+			if outcome.SessionState == dto.SessionAliveInTx {
+				scoped := ddl
+				if scoped.TargetDB == "" {
+					scoped.TargetDB = outcome.CurrentDB
+				}
+				if scoped.TargetSchema == "" && ts.Dialect() == dto.EnginePostgres {
+					scoped.TargetSchema = outcome.CurrentSchema
+				}
+				if len(scoped.ExtraObjects) > 0 {
+					extras := make([]sqlsplit.DDLObjectTarget, len(scoped.ExtraObjects))
+					copy(extras, scoped.ExtraObjects)
+					for i := range extras {
+						if extras[i].DB == "" {
+							extras[i].DB = outcome.CurrentDB
+						}
+						if extras[i].Schema == "" && ts.Dialect() == dto.EnginePostgres {
+							extras[i].Schema = outcome.CurrentSchema
+						}
+					}
+					scoped.ExtraObjects = extras
+				}
+				ts.RecordPendingTxDDL(scoped)
+			} else {
+				changes.add(ddl, outcome.CurrentDB, outcome.CurrentSchema, ts.Dialect())
+				if ddl.IsDropDB && ddl.TargetName != "" {
+					s.sessMgr.CloseDatabaseMetaPool(connID, ddl.TargetName)
+				}
+			}
+		} else if stmt.Kind == sqlsplit.KindCommit {
+			for _, pending := range ts.DrainPendingTxDDL() {
+				changes.add(pending, outcome.CurrentDB, outcome.CurrentSchema, ts.Dialect())
+			}
+		} else if stmt.Kind == sqlsplit.KindRollback {
+			// Only full ROLLBACK discards pending DDL; ROLLBACK TO SAVEPOINT preserves pre-savepoint DDL.
+			ts.ClearPendingTxDDL()
+		}
 	}
 
 	info := ts.Info()
@@ -391,8 +438,89 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 	resp.SessionState = info.SessionState
 	resp.SessionEpoch = info.SessionEpoch
 	resp.ExecutedAll = req.RunMode != "selection" && resp.Error == nil && len(resp.Statements) == len(allStmts)
+	resp.SchemaChanges = changes.build()
 	resp.TotalMs = time.Since(totalStart).Milliseconds()
 	return resp, nil
+}
+
+type schemaChangeCollector struct {
+	databasesChanged bool
+	droppedDBSet     map[string]struct{}
+	droppedDBs       []string
+	changedSchemaSet map[string]struct{}
+	changedSchemas   []string
+	changedObjSet    map[string]struct{}
+	changedObjects   []dto.SchemaObjectScope
+}
+
+func newSchemaChangeCollector() *schemaChangeCollector {
+	return &schemaChangeCollector{
+		droppedDBSet:     make(map[string]struct{}),
+		changedSchemaSet: make(map[string]struct{}),
+		changedObjSet:    make(map[string]struct{}),
+	}
+}
+
+func (c *schemaChangeCollector) addObjectScope(db, sch, currentDB, currentSchema string, engine dto.EngineType) {
+	if db == "" {
+		db = currentDB
+	}
+	if engine == dto.EnginePostgres {
+		if sch == "" {
+			sch = currentSchema
+		}
+	} else {
+		sch = ""
+	}
+	key := db + "\x00" + sch
+	if _, exists := c.changedObjSet[key]; !exists {
+		c.changedObjSet[key] = struct{}{}
+		c.changedObjects = append(c.changedObjects, dto.SchemaObjectScope{
+			Database: db,
+			Schema:   sch,
+		})
+	}
+}
+
+func (c *schemaChangeCollector) add(act sqlsplit.DDLAction, currentDB, currentSchema string, engine dto.EngineType) {
+	switch act.Scope {
+	case sqlsplit.DDLScopeDatabase:
+		c.databasesChanged = true
+		if act.IsDropDB && act.TargetName != "" {
+			if _, exists := c.droppedDBSet[act.TargetName]; !exists {
+				c.droppedDBSet[act.TargetName] = struct{}{}
+				c.droppedDBs = append(c.droppedDBs, act.TargetName)
+			}
+		}
+	case sqlsplit.DDLScopeSchema:
+		db := act.TargetDB
+		if db == "" {
+			db = currentDB
+		}
+		if db != "" {
+			if _, exists := c.changedSchemaSet[db]; !exists {
+				c.changedSchemaSet[db] = struct{}{}
+				c.changedSchemas = append(c.changedSchemas, db)
+			}
+		}
+	case sqlsplit.DDLScopeObject:
+		c.addObjectScope(act.TargetDB, act.TargetSchema, currentDB, currentSchema, engine)
+		for _, extra := range act.ExtraObjects {
+			c.addObjectScope(extra.DB, extra.Schema, currentDB, currentSchema, engine)
+		}
+	}
+}
+
+func (c *schemaChangeCollector) build() *dto.SchemaChanges {
+	if !c.databasesChanged && len(c.changedSchemas) == 0 && len(c.changedObjects) == 0 {
+		return nil
+	}
+	return &dto.SchemaChanges{
+		DatabasesChanged: c.databasesChanged,
+		DroppedDatabases: c.droppedDBs,
+		ChangedSchemas:   c.changedSchemas,
+		ChangedObjects:   c.changedObjects,
+	}
 }
 
 func computeHighRiskConfirmToken(connID, tabID string, stmts []sqlsplit.Statement, risks []dto.HighRiskStatement) string {

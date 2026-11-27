@@ -314,6 +314,7 @@ export interface ExecuteSQLResponse {
     "requiresConfirm"?: boolean;
     "confirmToken"?: string;
     "highRiskStatements"?: HighRiskStatement[] | null;
+    "schemaChanges"?: SchemaChanges | null;
     "error"?: AppError | null;
 }
 
@@ -476,6 +477,25 @@ export interface SaveConnectionRequest {
     "updateSshPassword"?: boolean;
     "sshPassphrase"?: string;
     "updateSshPassphrase"?: boolean;
+}
+
+/**
+ * SchemaChanges summarizes backend-verified structural DDL mutations so the UI can refresh
+ * affected Explorer nodes and invalidate stale caches without opening unnecessary DB connections.
+ */
+export interface SchemaChanges {
+    "databasesChanged"?: boolean;
+    "droppedDatabases"?: string[] | null;
+    "changedSchemas"?: string[] | null;
+    "changedObjects"?: SchemaObjectScope[] | null;
+}
+
+/**
+ * SchemaObjectScope identifies one (database, schema) object container whose tables/views/sequences changed.
+ */
+export interface SchemaObjectScope {
+    "database": string;
+    "schema"?: string;
 }
 
 /**

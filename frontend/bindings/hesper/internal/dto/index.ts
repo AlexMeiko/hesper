@@ -35,6 +35,8 @@ export type {
     SSHConfig,
     SSHHostKeyChallenge,
     SaveConnectionRequest,
+    SchemaChanges,
+    SchemaObjectScope,
     SessionStateEvent,
     StatementResult,
     TLSConfig,
