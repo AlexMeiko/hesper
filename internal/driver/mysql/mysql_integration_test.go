@@ -23,12 +23,12 @@ import (
 )
 
 func mysqlHostPort() (string, int) {
-	host := os.Getenv("SQLM_TEST_MYSQL_HOST")
+	host := os.Getenv("HESPER_TEST_MYSQL_HOST")
 	if host == "" {
 		host = "127.0.0.1"
 	}
 	port := 13306
-	if p := os.Getenv("SQLM_TEST_MYSQL_PORT"); p != "" {
+	if p := os.Getenv("HESPER_TEST_MYSQL_PORT"); p != "" {
 		_, _ = fmt.Sscanf(p, "%d", &port)
 	}
 	return host, port
@@ -39,6 +39,9 @@ func requireRealMySQL(t *testing.T) (string, int) {
 	host, port := mysqlHostPort()
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
 	if err != nil {
+		if os.Getenv("HESPER_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real MySQL 8.4 not reachable at %s:%d (HESPER_REQUIRE_REAL_DB=1): %v", host, port, err)
+		}
 		t.Skipf("real MySQL 8.4 not reachable at %s:%d (start with: docker compose -f docker-compose.test.yml up -d --wait): %v", host, port, err)
 	}
 	_ = c.Close()

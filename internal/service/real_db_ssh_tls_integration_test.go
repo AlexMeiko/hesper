@@ -100,7 +100,7 @@ func realDBTargets() []realDBTarget {
 
 func requireRealDBsAndCerts(t *testing.T) string {
 	t.Helper()
-	strict := os.Getenv("SQLM_REQUIRE_REAL_DB") == "1"
+	strict := os.Getenv("HESPER_REQUIRE_REAL_DB") == "1"
 	failOrSkip := func(format string, args ...any) {
 		if strict {
 			t.Fatalf(format, args...)

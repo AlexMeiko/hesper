@@ -20,12 +20,12 @@ import (
 )
 
 func pgHostPort() (string, int) {
-	host := os.Getenv("SQLM_TEST_PG_HOST")
+	host := os.Getenv("HESPER_TEST_PG_HOST")
 	if host == "" {
 		host = "127.0.0.1"
 	}
 	port := 15432
-	if p := os.Getenv("SQLM_TEST_PG_PORT"); p != "" {
+	if p := os.Getenv("HESPER_TEST_PG_PORT"); p != "" {
 		_, _ = fmt.Sscanf(p, "%d", &port)
 	}
 	return host, port
@@ -36,6 +36,9 @@ func requireRealPG(t *testing.T) {
 	host, port := pgHostPort()
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, port), 2*time.Second)
 	if err != nil {
+		if os.Getenv("HESPER_REQUIRE_REAL_DB") == "1" {
+			t.Fatalf("real PostgreSQL 16 not reachable at %s:%d (HESPER_REQUIRE_REAL_DB=1): %v", host, port, err)
+		}
 		t.Skipf("real PostgreSQL 16 not reachable at %s:%d: %v", host, port, err)
 	}
 	_ = c.Close()

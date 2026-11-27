@@ -104,7 +104,7 @@ cd frontend && pnpm test
 ```bash
 ./scripts/gen-test-tls-certs.sh
 docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml up -d --wait
-SQLM_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/... ./internal/tunnel ./internal/session ./internal/service
+HESPER_REQUIRE_REAL_DB=1 go test -v -race -count=1 ./internal/driver/... ./internal/tunnel ./internal/session ./internal/service
 docker compose -f docker-compose.test.yml -f docker-compose.tls.test.yml down -v
 rm -rf test/.tls-certs
 ```
@@ -133,3 +133,9 @@ hesper/
 ```
 
 更多设计细节与阶段规划请查阅 [docs/](docs/README.md)。
+
+---
+
+## 开源许可
+
+本项目基于 [Apache License 2.0](LICENSE) 开源发布。
