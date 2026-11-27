@@ -7,8 +7,9 @@ import { useShortcuts } from '@/composables/useShortcuts'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSettingsStore } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useWorkspaceStore, type WorkspaceTab } from '@/stores/workspace'
 import { envColorHex } from '@/utils/format'
+import { formatTablePath } from '@/utils/tableMeta'
 import CommandPalette from './components/CommandPalette.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import ConnectionModal from './components/ConnectionModal.vue'
@@ -42,6 +43,14 @@ function startSidebarResize(ev: MouseEvent) {
 function tabEnvColor(connId: string): string {
   const c = connStore.getConnection(connId)
   return envColorHex(c?.envColor)
+}
+
+function tabTooltip(tab: WorkspaceTab): string {
+  if (tab.kind === 'browse') {
+    const active = connStore.getActive(tab.connectionId)
+    return formatTablePath(tab.database, tab.schema, tab.table, active?.capabilities.hasDatabases !== false)
+  }
+  return tab.title
 }
 
 let unsubSessionState: (() => void) | null = null
@@ -89,6 +98,7 @@ onUnmounted(() => {
           <div
             v-for="tab in wsStore.tabs"
             :key="tab.id"
+            :title="tabTooltip(tab)"
             class="group relative h-8 px-2.5 rounded-md flex items-center gap-1.5 text-[13px] cursor-pointer max-w-[240px] shrink-0 border transition-colors"
             :class="
               wsStore.activeTabId === tab.id

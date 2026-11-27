@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { api } from '@/api/client'
 import { EngineType, ErrorCode, SessionState, type ConnectionDTO, type ConnectResult } from '@/api/types'
 import ExplorerSidebar from '@/components/ExplorerSidebar.vue'
+import TableBrowseView from '@/components/TableBrowseView.vue'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSchemaStore } from '@/stores/schema'
 import { useUiStore } from '@/stores/ui'
@@ -451,5 +452,297 @@ describe('Connection lifecycle serialization, disconnect races & ExplorerSidebar
     expect(disconnectSpy).toHaveBeenCalledWith('sqlite-dirty')
     expect(connStore.activeMap['sqlite-dirty']).toBeUndefined()
     expect(wsStore.tabs.some((t) => t.id === 'q-sqlite-dirty')).toBe(false)
+  })
+
+  it('auto-expands and selects the matching table in ExplorerSidebar when switching active browse tabs', async () => {
+    const connStore = useConnectionsStore()
+    const schemaStore = useSchemaStore()
+    const wsStore = useWorkspaceStore()
+
+    markConnected(
+      connStore,
+      makePgConn('pg-sync'),
+      makeConnectResult({
+        connectionId: 'pg-sync',
+        currentDb: 'db_a',
+      }),
+    )
+    schemaStore.databasesMap['pg-sync'] = [
+      { name: 'db_a', isSystem: false },
+      { name: 'db_b', isSystem: false },
+    ]
+    schemaStore.schemasMap[schemaStore.dbKey('pg-sync', 'db_a')] = ['public']
+    schemaStore.objectsMap[schemaStore.objKey('pg-sync', 'db_a', 'public')] = {
+      tables: [{ database: 'db_a', schema: 'public', name: 'users', estimatedRows: 10 }],
+      views: [],
+      sequences: [],
+      loading: false,
+      loaded: true,
+    }
+
+    vi.spyOn(api, 'listSchemas').mockResolvedValue(['analytics'])
+    vi.spyOn(api, 'listTables').mockResolvedValue([
+      { database: 'db_b', schema: 'analytics', name: 'events', estimatedRows: 20 },
+    ])
+    vi.spyOn(api, 'listViews').mockResolvedValue([])
+    vi.spyOn(api, 'listSequences').mockResolvedValue([])
+
+    wsStore.tabs.push(
+      {
+        id: 'browse-users',
+        kind: 'browse',
+        title: 'public.users',
+        connectionId: 'pg-sync',
+        database: 'db_a',
+        schema: 'public',
+        table: 'users',
+        page: 1,
+        pageSize: 200,
+        sortColumn: '',
+        sortDir: '',
+        filterWhere: '',
+        loading: false,
+        showExecutedSql: false,
+        response: null,
+        error: null,
+      },
+      {
+        id: 'browse-events',
+        kind: 'browse',
+        title: 'analytics.events',
+        connectionId: 'pg-sync',
+        database: 'db_b',
+        schema: 'analytics',
+        table: 'events',
+        page: 1,
+        pageSize: 200,
+        sortColumn: '',
+        sortDir: '',
+        filterWhere: '',
+        loading: false,
+        showExecutedSql: false,
+        response: null,
+        error: null,
+      },
+      makeQueryTab({ id: 'q-1', connectionId: 'pg-sync', database: 'db_a', schema: 'public' }),
+    )
+    wsStore.setActiveTab('browse-users')
+
+    const sidebar = mount(ExplorerSidebar)
+    await flushPromises()
+    await nextTick()
+
+    // Initial active browse tab auto-expands conn/db_a/public and selects "users"
+    expect(sidebar.find('[data-selected="true"]').text()).toContain('users')
+
+    // Switching to browse-events auto-expands db_b/analytics, loads objects, and highlights "events"
+    wsStore.setActiveTab('browse-events')
+    await flushPromises()
+    await nextTick()
+
+    const selectedAfterSwitch = sidebar.findAll('[data-selected="true"]')
+    expect(selectedAfterSwitch).toHaveLength(1)
+    expect(selectedAfterSwitch[0].text()).toContain('events')
+
+    // Switching to a query tab clears table highlight cleanly
+    wsStore.setActiveTab('q-1')
+    await nextTick()
+    expect(sidebar.findAll('[data-selected="true"]')).toHaveLength(0)
+  })
+
+  it('auto-refreshes Explorer after DROP DATABASE / CREATE TABLE and warns on preserved browse tabs', async () => {
+    const connStore = useConnectionsStore()
+    const schemaStore = useSchemaStore()
+    const wsStore = useWorkspaceStore()
+
+    markConnected(
+      connStore,
+      makePgConn('pg-ddl'),
+      makeConnectResult({ connectionId: 'pg-ddl', currentDb: 'postgres' }),
+    )
+    schemaStore.databasesMap['pg-ddl'] = [
+      { name: 'postgres', isSystem: true },
+      { name: 'blue_m2', isSystem: false },
+    ]
+    schemaStore.schemasMap[schemaStore.dbKey('pg-ddl', 'blue_m2')] = ['public']
+    schemaStore.objectsMap[schemaStore.objKey('pg-ddl', 'blue_m2', 'public')] = {
+      tables: [{ database: 'blue_m2', schema: 'public', name: 'orders', estimatedRows: 10 }],
+      views: [],
+      sequences: [],
+      loading: false,
+      loaded: true,
+    }
+    schemaStore.objectsMap[schemaStore.objKey('pg-ddl', 'postgres', 'public')] = {
+      tables: [],
+      views: [],
+      sequences: [],
+      loading: false,
+      loaded: true,
+    }
+
+    const browseTab = {
+      id: 'browse-blue',
+      kind: 'browse' as const,
+      title: 'public.orders',
+      connectionId: 'pg-ddl',
+      database: 'blue_m2',
+      schema: 'public',
+      table: 'orders',
+      page: 1,
+      pageSize: 200,
+      sortColumn: '',
+      sortDir: '' as const,
+      filterWhere: '',
+      loading: false,
+      showExecutedSql: false,
+      response: null,
+      error: null,
+    }
+    wsStore.tabs.push(
+      browseTab,
+      makeQueryTab({ id: 'q-ddl', connectionId: 'pg-ddl', database: 'postgres', schema: 'public', sql: 'DROP DATABASE blue_m2;' }),
+    )
+
+    const listDbsSpy = vi.spyOn(api, 'listDatabases').mockResolvedValue([{ name: 'postgres', isSystem: true }])
+    const listTablesSpy = vi.spyOn(api, 'listTables').mockResolvedValue([
+      { database: 'postgres', schema: 'public', name: 'new_tbl', estimatedRows: 0 },
+    ])
+    vi.spyOn(api, 'listViews').mockResolvedValue([])
+    vi.spyOn(api, 'listSequences').mockResolvedValue([])
+    vi.spyOn(api, 'executeSQL').mockResolvedValueOnce({
+      tabId: 'q-ddl',
+      execId: 'e1',
+      currentDb: 'postgres',
+      currentSchema: 'public',
+      sessionState: SessionState.SessionAliveIdle,
+      sessionEpoch: 2,
+      statements: [{ index: 0, sql: 'DROP DATABASE blue_m2;', startLine: 1, isResultSet: false, affectedRows: 0, durationMs: 8 }],
+      executedAll: true,
+      totalMs: 8,
+      schemaChanges: {
+        databasesChanged: true,
+        droppedDatabases: ['blue_m2'],
+      },
+    })
+
+    await wsStore.executeQuery('q-ddl', { runMode: 'all', cursorOffset: 0 })
+    await flushPromises()
+
+    expect(listDbsSpy).toHaveBeenCalledWith('pg-ddl')
+    expect(schemaStore.databasesMap['pg-ddl'].map((d) => d.name)).toEqual(['postgres'])
+    expect(schemaStore.schemasMap[schemaStore.dbKey('pg-ddl', 'blue_m2')]).toBeUndefined()
+    expect(schemaStore.objectsMap[schemaStore.objKey('pg-ddl', 'blue_m2', 'public')]).toBeUndefined()
+
+    // Browse tab is preserved and displays a dropped-database warning banner
+    const preserved = wsStore.tabs.find((t) => t.id === 'browse-blue')
+    expect(preserved?.kind).toBe('browse')
+    if (preserved?.kind === 'browse') {
+      expect(preserved.droppedNotice).toContain('blue_m2')
+      const browseView = mount(TableBrowseView, { props: { tab: preserved } })
+      expect(browseView.find('[data-testid="browse-dropped-db-banner"]').exists()).toBe(true)
+      expect(browseView.text()).toContain('已被删除')
+    }
+
+    // CREATE TABLE refreshes ONLY already-loaded (postgres, public) and skips unloaded (unloaded_db, public)
+    vi.spyOn(api, 'executeSQL').mockResolvedValueOnce({
+      tabId: 'q-ddl',
+      execId: 'e2',
+      currentDb: 'postgres',
+      currentSchema: 'public',
+      sessionState: SessionState.SessionAliveIdle,
+      sessionEpoch: 2,
+      statements: [{ index: 0, sql: 'CREATE TABLE new_tbl (id int);', startLine: 1, isResultSet: false, affectedRows: 0, durationMs: 3 }],
+      executedAll: true,
+      totalMs: 3,
+      schemaChanges: {
+        changedObjects: [
+          { database: 'postgres', schema: 'public' },
+          { database: 'unloaded_db', schema: 'public' },
+        ],
+      },
+    })
+
+    await wsStore.executeQuery('q-ddl', { sqlOverride: 'CREATE TABLE new_tbl (id int);', runMode: 'all', cursorOffset: 0 })
+    await flushPromises()
+    expect(listTablesSpy).toHaveBeenCalledTimes(1)
+    expect(listTablesSpy).toHaveBeenCalledWith('pg-ddl', 'postgres', 'public')
+  })
+
+  it('returns raw PG 55006 DROP DATABASE error verbatim without modifying tabs or database list', async () => {
+    const connStore = useConnectionsStore()
+    const schemaStore = useSchemaStore()
+    const wsStore = useWorkspaceStore()
+
+    markConnected(
+      connStore,
+      makePgConn('pg-55006'),
+      makeConnectResult({ connectionId: 'pg-55006', currentDb: 'postgres' }),
+    )
+    schemaStore.databasesMap['pg-55006'] = [
+      { name: 'postgres', isSystem: true },
+      { name: 'blue_m2', isSystem: false },
+    ]
+    wsStore.tabs.push(
+      makeQueryTab({ id: 'q-drop', connectionId: 'pg-55006', database: 'postgres', schema: 'public', sql: 'DROP DATABASE blue_m2;' }),
+    )
+
+    vi.spyOn(api, 'executeSQL').mockResolvedValue({
+      tabId: 'q-drop',
+      execId: 'e1',
+      currentDb: 'postgres',
+      currentSchema: 'public',
+      sessionState: SessionState.SessionAliveIdle,
+      sessionEpoch: 2,
+      statements: [],
+      totalMs: 5,
+      error: {
+        code: ErrorCode.ErrInternal,
+        message: 'PostgreSQL 错误 (55006): database "blue_m2" is being accessed by other users',
+        detail: 'There are 2 other sessions using the database.',
+        sqlState: '55006',
+        retrySafe: false,
+      },
+    })
+
+    await wsStore.executeQuery('q-drop', { runMode: 'all', cursorOffset: 0 })
+    const qTab = wsStore.tabs[0]
+    expect(qTab.kind).toBe('query')
+    if (qTab.kind !== 'query') return
+
+    expect(qTab.bannerError?.sqlState).toBe('55006')
+    expect(qTab.bannerError?.message).toContain('is being accessed by other users')
+    expect(schemaStore.databasesMap['pg-55006'].map((d) => d.name)).toEqual(['postgres', 'blue_m2'])
+  })
+
+  it('provides a manual refresh-databases button on multi-DB connection nodes in ExplorerSidebar', async () => {
+    const connStore = useConnectionsStore()
+    const schemaStore = useSchemaStore()
+
+    markConnected(
+      connStore,
+      makePgConn('pg-refresh'),
+      makeConnectResult({ connectionId: 'pg-refresh', currentDb: 'postgres' }),
+    )
+    schemaStore.databasesMap['pg-refresh'] = [
+      { name: 'postgres', isSystem: true },
+      { name: 'old_db', isSystem: false },
+    ]
+
+    const listDbsSpy = vi.spyOn(api, 'listDatabases').mockResolvedValue([
+      { name: 'postgres', isSystem: true },
+      { name: 'fresh_db', isSystem: false },
+    ])
+
+    const sidebar = mount(ExplorerSidebar)
+    await nextTick()
+    const refreshBtn = sidebar.find('[data-testid="refresh-conn-btn"]')
+    expect(refreshBtn.exists()).toBe(true)
+    expect(refreshBtn.attributes('title')).toBe('刷新数据库列表')
+
+    await refreshBtn.trigger('click')
+    await flushPromises()
+
+    expect(listDbsSpy).toHaveBeenCalledWith('pg-refresh')
+    expect(schemaStore.databasesMap['pg-refresh'].map((d) => d.name)).toEqual(['postgres', 'fresh_db'])
   })
 })

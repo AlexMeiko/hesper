@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Code2, Database, FileCode2, Filter, Info, RefreshCw, ShieldCheck, Table2 } from 'lucide-vue-next'
+import { AlertTriangle, Code2, Database, FileCode2, Filter, Info, RefreshCw, ShieldCheck, Table2, X } from 'lucide-vue-next'
 import { EngineType, RowIdentityKind } from '@/api/types'
 import { useConnectionsStore } from '@/stores/connections'
 import { useUiStore } from '@/stores/ui'
 import { useWorkspaceStore, type BrowseTab } from '@/stores/workspace'
 import { formatDuration } from '@/utils/format'
-import { buildQuickSelectSQL, formatEditabilitySummary, formatTablePath } from '@/utils/tableMeta'
+import { buildQuickSelectSQL, formatEditabilitySummary } from '@/utils/tableMeta'
 import DataGrid, { type GridCopyNotice } from './DataGrid.vue'
 import PaginationBar from './PaginationBar.vue'
 import SessionBanner from './SessionBanner.vue'
@@ -33,15 +33,6 @@ const dialect = computed<EngineType>(
 const columns = computed(() => props.tab.response?.columns ?? [])
 const rows = computed(() => props.tab.response?.rows ?? [])
 const rowOffset = computed(() => (props.tab.page - 1) * props.tab.pageSize)
-
-const displayTablePath = computed(() =>
-  formatTablePath(
-    props.tab.database,
-    props.tab.schema,
-    props.tab.table,
-    activeConn.value?.capabilities.hasDatabases !== false,
-  ),
-)
 
 const editabilitySummary = computed(() =>
   formatEditabilitySummary(props.tab.response?.editability, Boolean(conn.value?.readOnly)),
@@ -75,18 +66,13 @@ function onGridCopied(notice: GridCopyNotice) {
   <div class="flex flex-col flex-1 min-h-0 overflow-hidden">
     <!-- Top Live-Browse Toolbar -->
     <div class="px-3 py-2 border-b border-border bg-surface flex flex-wrap items-center gap-2 shrink-0">
-      <div class="flex items-center gap-2 mr-1">
-        <span
-          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-success-soft text-success"
-          title="双击表打开实时表浏览：按稳定键排序实时查库，与编辑器一次性快照严格分离"
-        >
-          <Table2 class="w-3.5 h-3.5" />
-          实时浏览
-        </span>
-        <span class="text-[13px] font-medium text-ink">
-          {{ displayTablePath }}
-        </span>
-      </div>
+      <span
+        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-success-soft text-success shrink-0"
+        title="双击表打开实时表浏览：按稳定键排序实时查库，与编辑器一次性快照严格分离"
+      >
+        <Table2 class="w-3.5 h-3.5" />
+        实时浏览
+      </span>
 
       <!-- Quick WHERE Filter -->
       <div class="flex items-center gap-1.5 flex-1 min-w-[220px] max-w-md">
@@ -151,6 +137,28 @@ function onGridCopied(notice: GridCopyNotice) {
       <span v-if="tab.response.stableOrderUsed" class="shrink-0 text-xs text-ink-muted">
         稳定排序: {{ (tab.response.orderColumns ?? []).join(', ') }}
       </span>
+    </div>
+
+    <!-- Dropped Database Notice Banner (tab preserved per user preference) -->
+    <div
+      v-if="tab.droppedNotice"
+      data-testid="browse-dropped-db-banner"
+      class="px-3 pt-2 shrink-0"
+    >
+      <div class="flex items-center justify-between gap-3 rounded-lg border border-warning bg-warning-soft text-warning px-3 py-2 text-xs">
+        <div class="flex items-center gap-2 min-w-0">
+          <AlertTriangle class="w-4 h-4 shrink-0" />
+          <span>{{ tab.droppedNotice }}</span>
+        </div>
+        <button
+          type="button"
+          class="btn btn-xs shrink-0"
+          @click="wsStore.closeTab(tab.id)"
+        >
+          <X class="w-3 h-3" />
+          关闭标签
+        </button>
+      </div>
     </div>
 
     <!-- Error Banner -->

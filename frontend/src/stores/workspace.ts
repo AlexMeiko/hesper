@@ -35,6 +35,7 @@ export interface BrowseTab {
   showExecutedSql: boolean
   response: BrowseTableResponse | null
   error: AppError | null
+  droppedNotice?: string
 }
 
 export interface QueryStatementView extends StatementResult {
@@ -249,6 +250,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         filterWhere: tab.filterWhere,
       })
       tab.response = resp ? markRaw(resp) : null
+      tab.droppedNotice = ''
     } catch (err) {
       tab.error = parseAppError(err)
     } finally {
@@ -555,6 +557,20 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
     const firstResultIdx = stmts.findIndex((s) => s.isResultSet)
     tab.activeResultIdx = firstResultIdx >= 0 ? firstResultIdx : stmts.length > 0 ? 0 : -1
+
+    // Apply backend-reported structural DDL changes to Explorer caches & open browse tabs.
+    if (resp.schemaChanges) {
+      void schemaStore.applySchemaChanges(tab.connectionId, resp.schemaChanges)
+      const droppedDbs = resp.schemaChanges.droppedDatabases ?? []
+      if (droppedDbs.length > 0) {
+        const droppedSet = new Set(droppedDbs)
+        for (const t of tabs.value) {
+          if (t.kind === 'browse' && t.connectionId === tab.connectionId && droppedSet.has(t.database)) {
+            t.droppedNotice = `所属数据库「${t.database}」已被删除，当前保留的是历史缓存数据。`
+          }
+        }
+      }
+    }
 
     // Refresh autocomplete catalog & schema list when SQL execution switched DB/Schema (e.g. USE other_db)
     if (tab.database !== prevDb || tab.schema !== prevSchema) {

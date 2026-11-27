@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { markRaw, ref } from 'vue'
 import { api, parseAppError } from '@/api/client'
-import type { CompletionCatalog, DatabaseInfo, ObjectSummary, TableSummary } from '@/api/types'
+import type { CompletionCatalog, DatabaseInfo, ObjectSummary, SchemaChanges, TableSummary } from '@/api/types'
 import { useConnectionsStore } from './connections'
 import { useUiStore } from './ui'
 
@@ -248,6 +248,88 @@ export const useSchemaStore = defineStore('schema', () => {
     })
   }
 
+  function evictDatabaseCache(connId: string, db: string) {
+    if (!connId || !db) return
+    const dKey = dbKey(connId, db)
+    delete schemasMap.value[dKey]
+    inflightSchemas.delete(dKey)
+    nextSeq(`sch::${dKey}`)
+
+    const objPrefix = `${dKey}::`
+    for (const k of Object.keys(objectsMap.value)) {
+      if (k.startsWith(objPrefix)) {
+        delete objectsMap.value[k]
+        nextSeq(`obj::${k}`)
+      }
+    }
+    for (const k of Object.keys(catalogMap.value)) {
+      if (k.startsWith(objPrefix)) {
+        delete catalogMap.value[k]
+        nextSeq(`cat::${k}`)
+      }
+    }
+    for (const k of inflightObjects.keys()) {
+      if (k.startsWith(objPrefix)) inflightObjects.delete(k)
+    }
+    for (const k of inflightCatalog.keys()) {
+      if (k.startsWith(objPrefix)) inflightCatalog.delete(k)
+    }
+  }
+
+  /**
+   * Applies backend-reported structural DDL changes to cached Explorer metadata.
+   * Only refreshes already-loaded schema/object nodes so unopened PG databases are never
+   * needlessly connected in the background.
+   */
+  async function applySchemaChanges(connId: string, changes: SchemaChanges | null | undefined) {
+    if (!connId || !changes) return
+    const connStore = useConnectionsStore()
+    const active = connStore.getActive(connId)
+    if (!active) return
+
+    const droppedSet = new Set(changes.droppedDatabases ?? [])
+    for (const db of droppedSet) {
+      evictDatabaseCache(connId, db)
+    }
+
+    const tasks: Array<Promise<unknown>> = []
+
+    if (changes.databasesChanged && active.capabilities.hasDatabases) {
+      tasks.push(
+        loadDatabases(connId, true).catch(() => {
+          // Ignore transient refresh failures; user can manually refresh connection node.
+        }),
+      )
+    }
+
+    if (active.capabilities.hasSchemas) {
+      for (const db of changes.changedSchemas ?? []) {
+        if (!db || droppedSet.has(db)) continue
+        const dKey = dbKey(connId, db)
+        if (schemasMap.value[dKey] !== undefined) {
+          tasks.push(loadSchemas(connId, db, true).catch(() => {}))
+        }
+      }
+    }
+
+    for (const scope of changes.changedObjects ?? []) {
+      const effectiveDb = resolveEffectiveDatabase(connId, scope.database)
+      if (effectiveDb && droppedSet.has(effectiveDb)) continue
+      const effectiveSchema = active.capabilities.hasSchemas ? (scope.schema ?? '') : ''
+      const oKey = objKey(connId, effectiveDb, effectiveSchema)
+      if (objectsMap.value[oKey]?.loaded) {
+        tasks.push(loadObjects(connId, effectiveDb, effectiveSchema, true).catch(() => {}))
+      }
+      if (catalogMap.value[oKey]) {
+        tasks.push(loadCompletionCatalog(connId, effectiveDb, effectiveSchema, true).catch(() => {}))
+      }
+    }
+
+    if (tasks.length > 0) {
+      await Promise.allSettled(tasks)
+    }
+  }
+
   function clearConnectionCache(connId: string) {
     // Bump connection epoch so any still-in-flight RPC responses are silently discarded
     connEpochs.set(connId, getEpoch(connId) + 1)
@@ -290,6 +372,8 @@ export const useSchemaStore = defineStore('schema', () => {
     loadSchemas,
     loadObjects,
     loadCompletionCatalog,
+    evictDatabaseCache,
+    applySchemaChanges,
     clearConnectionCache,
   }
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import {
   ChevronDown,
@@ -21,6 +21,7 @@ import {
   Table2,
   Trash2,
 } from 'lucide-vue-next'
+import { parseAppError } from '@/api/client'
 import type { ConnectionDTO, ConnectResult, DatabaseInfo, ObjectSummary, TableSummary } from '@/api/types'
 import { useConnectionsStore } from '@/stores/connections'
 import { useSchemaStore } from '@/stores/schema'
@@ -182,6 +183,114 @@ watch([flatNodes, () => settings.fontScale], () => {
   treeVirtualizer.value.measure()
 })
 
+const activeBrowseTarget = computed(() => {
+  const tab = wsStore.activeTab
+  if (!tab || tab.kind !== 'browse') return null
+  return {
+    tabId: tab.id,
+    connId: tab.connectionId,
+    db: tab.database,
+    schema: tab.schema,
+    table: tab.table,
+  }
+})
+
+function isActiveBrowseNode(node: TreeNode): boolean {
+  const target = activeBrowseTarget.value
+  if (!target) return false
+  if (node.kind !== 'table' && node.kind !== 'view') return false
+  const name = node.kind === 'table' ? node.table.name : node.view.name
+  if (node.connId !== target.connId || name !== target.table || node.schema !== target.schema) {
+    return false
+  }
+  const active = connStore.getActive(node.connId)
+  if (active && !active.capabilities.hasDatabases) {
+    return true
+  }
+  return node.db === target.db
+}
+
+function scrollNodeIntoView(idx: number) {
+  if (idx < 0) return
+  const el = treeScrollRef.value
+  const existing = treeVirtualizer.value.getVirtualItems().find((item) => item.index === idx)
+  if (el && existing && el.clientHeight > 0) {
+    const top = el.scrollTop
+    const bottom = top + el.clientHeight
+    if (existing.start >= top && existing.end <= bottom) {
+      return
+    }
+  }
+  treeVirtualizer.value.scrollToIndex(idx, { align: 'center' })
+}
+
+let browseSyncSeq = 0
+
+async function syncExplorerToActiveBrowseTab(target: NonNullable<typeof activeBrowseTarget.value>) {
+  const seq = ++browseSyncSeq
+  const active = connStore.getActive(target.connId)
+  if (!active) return
+
+  expandedConns.value[target.connId] = true
+
+  if (active.capabilities.hasDatabases) {
+    const allDbs = schemaStore.databasesMap[target.connId] ?? []
+    const dbInfo = allDbs.find((d) => d.name === target.db)
+    if (dbInfo?.isSystem && !showSystemDbs.value) {
+      showSystemDbs.value = true
+    }
+
+    const dKey = schemaStore.dbKey(target.connId, target.db)
+    expandedDbs.value[dKey] = true
+
+    if (active.capabilities.hasSchemas) {
+      if (!schemaStore.schemasMap[dKey]) {
+        const schemas = await schemaStore.loadSchemas(target.connId, target.db)
+        if (seq !== browseSyncSeq || !schemas) return
+      }
+      if (target.schema) {
+        const sKey = schemaStore.objKey(target.connId, target.db, target.schema)
+        expandedSchemas.value[sKey] = true
+        if (!schemaStore.objectsMap[sKey]?.loaded) {
+          await schemaStore.loadObjects(target.connId, target.db, target.schema)
+          if (seq !== browseSyncSeq) return
+        }
+      }
+    } else {
+      const oKey = schemaStore.objKey(target.connId, target.db, '')
+      if (!schemaStore.objectsMap[oKey]?.loaded) {
+        await schemaStore.loadObjects(target.connId, target.db, '')
+        if (seq !== browseSyncSeq) return
+      }
+    }
+  } else {
+    const db = schemaStore.resolveEffectiveDatabase(target.connId)
+    const oKey = schemaStore.objKey(target.connId, db, '')
+    if (!schemaStore.objectsMap[oKey]?.loaded) {
+      await schemaStore.loadObjects(target.connId, db, '')
+      if (seq !== browseSyncSeq) return
+    }
+  }
+
+  await nextTick()
+  if (seq !== browseSyncSeq) return
+  treeVirtualizer.value.measure()
+  const idx = flatNodes.value.findIndex((node) => isActiveBrowseNode(node))
+  scrollNodeIntoView(idx)
+}
+
+watch(
+  activeBrowseTarget,
+  (target) => {
+    if (!target) {
+      browseSyncSeq++
+      return
+    }
+    void syncExplorerToActiveBrowseTab(target)
+  },
+  { immediate: true },
+)
+
 const visibleTreeRows = computed(() => {
   const nodes = flatNodes.value
   return treeVirtualizer.value
@@ -253,19 +362,70 @@ async function toggleSchema(connId: string, dbName: string, schemaName: string) 
   await schemaStore.loadObjects(connId, dbName, schemaName)
 }
 
-function refreshDatabase(connId: string, dbName: string) {
+function refreshConnectionDatabases(connId: string) {
+  void schemaStore.loadDatabases(connId, true).catch((err) => {
+    const e = parseAppError(err)
+    uiStore.notify('error', '刷新数据库列表失败', e.message)
+  })
+}
+
+async function refreshDatabase(connId: string, dbName: string) {
   const active = connStore.getActive(connId)
   if (active?.capabilities.hasSchemas) {
-    void schemaStore.loadSchemas(connId, dbName, true)
+    try {
+      const schemas = await schemaStore.loadSchemas(connId, dbName, true)
+      if (!schemas) return
+      for (const sch of schemas) {
+        const sKey = schemaStore.objKey(connId, dbName, sch)
+        if (expandedSchemas.value[sKey]) {
+          void schemaStore.loadObjects(connId, dbName, sch, true)
+        }
+      }
+    } catch (err) {
+      const e = parseAppError(err)
+      uiStore.notify('error', '刷新 Schema 列表失败', e.message)
+    }
   } else {
     void schemaStore.loadObjects(connId, dbName, '', true)
   }
+}
+
+function refreshSchema(connId: string, dbName: string, schemaName: string) {
+  void schemaStore.loadObjects(connId, dbName, schemaName, true)
 }
 
 function refreshSingleFileObjects(connId: string) {
   const db = schemaStore.resolveEffectiveDatabase(connId)
   void schemaStore.loadObjects(connId, db, '', true)
 }
+
+// Prune stale expanded states whenever databases are dropped/removed from a connection's database list.
+watch(
+  () => schemaStore.databasesMap,
+  (map) => {
+    for (const [connId, dbs] of Object.entries(map)) {
+      const valid = new Set((dbs ?? []).map((d) => d.name))
+      const connPrefix = `${connId}::`
+      for (const key of Object.keys(expandedDbs.value)) {
+        if (!key.startsWith(connPrefix)) continue
+        const dbName = key.slice(connPrefix.length)
+        if (!valid.has(dbName)) {
+          delete expandedDbs.value[key]
+        }
+      }
+      for (const key of Object.keys(expandedSchemas.value)) {
+        if (!key.startsWith(connPrefix)) continue
+        const rest = key.slice(connPrefix.length)
+        const sep = rest.indexOf('::')
+        const dbName = sep >= 0 ? rest.slice(0, sep) : rest
+        if (!valid.has(dbName)) {
+          delete expandedSchemas.value[key]
+        }
+      }
+    }
+  },
+  { deep: true },
+)
 
 async function onDisconnect(connId: string) {
   if (wsStore.hasDirtyOrRunningTabs(connId)) {
@@ -442,11 +602,16 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
                 <Play class="w-3 h-3" />
               </button>
               <button
-                v-if="node.active && !node.active.capabilities.hasDatabases"
+                v-if="node.active"
                 type="button"
+                data-testid="refresh-conn-btn"
                 class="btn btn-ghost btn-icon-xs"
-                title="刷新表与视图"
-                @click="refreshSingleFileObjects(node.conn.id)"
+                :title="node.active.capabilities.hasDatabases ? '刷新数据库列表' : '刷新表与视图'"
+                @click="
+                  node.active.capabilities.hasDatabases
+                    ? refreshConnectionDatabases(node.conn.id)
+                    : refreshSingleFileObjects(node.conn.id)
+                "
               >
                 <RefreshCw class="w-3 h-3" />
               </button>
@@ -529,27 +694,44 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
             <ChevronRight v-else class="w-3.5 h-3.5 shrink-0 text-ink-muted" />
             <Layers class="w-3.5 h-3.5 shrink-0 text-ink-secondary" />
             <span class="truncate flex-1 text-ink">{{ node.schema }}</span>
-            <button
-              type="button"
-              class="hidden group-hover:inline-flex btn btn-ghost btn-icon-xs shrink-0"
-              title="在此 Schema 新建查询"
-              @click.stop="wsStore.openQueryTab(node.connId, node.db, node.schema)"
-            >
-              <Play class="w-3 h-3" />
-            </button>
+            <div class="hidden group-hover:flex items-center gap-0.5 shrink-0" @click.stop>
+              <button
+                type="button"
+                class="btn btn-ghost btn-icon-xs"
+                title="在此 Schema 新建查询"
+                @click="wsStore.openQueryTab(node.connId, node.db, node.schema)"
+              >
+                <Play class="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-icon-xs"
+                title="刷新对象列表"
+                @click="refreshSchema(node.connId, node.db, node.schema)"
+              >
+                <RefreshCw class="w-3 h-3" />
+              </button>
+            </div>
           </div>
 
           <!-- 4. Table Node (unified across all 4 engines!) -->
           <div
             v-else-if="node.kind === 'table'"
-            class="group w-full h-full flex items-center gap-1.5 pr-2 rounded-md cursor-pointer hover:bg-subtle"
+            :data-selected="isActiveBrowseNode(node) ? 'true' : undefined"
+            class="group w-full h-full flex items-center gap-1.5 pr-2 rounded-md cursor-pointer transition-colors"
+            :class="isActiveBrowseNode(node) ? 'bg-accent-soft text-accent-text font-medium' : 'hover:bg-subtle'"
             :style="{ paddingLeft: `${indentPx(node.depth)}px` }"
-            title="双击实时浏览表数据，右键查看更多操作"
+            :title="`${node.table.name} - 双击实时浏览表数据，右键查看更多操作`"
             @dblclick="wsStore.openTableBrowse(node.connId, node.db, node.schema, node.table.name)"
             @contextmenu="openTableContextMenu($event, node.connId, node.db, node.schema, node.table.name)"
           >
-            <Table2 class="w-3.5 h-3.5 shrink-0 text-ink-muted" />
-            <span class="truncate flex-1 text-ink">{{ node.table.name }}</span>
+            <Table2
+              class="w-3.5 h-3.5 shrink-0"
+              :class="isActiveBrowseNode(node) ? 'text-accent-text' : 'text-ink-muted'"
+            />
+            <span class="truncate flex-1" :class="isActiveBrowseNode(node) ? 'text-accent-text' : 'text-ink'">
+              {{ node.table.name }}
+            </span>
             <span
               v-if="node.table.engine && node.table.engine.toLowerCase() !== 'innodb'"
               class="text-[11px] px-1 rounded bg-subtle text-ink-faint shrink-0"
@@ -576,13 +758,17 @@ onBeforeUnmount(() => window.removeEventListener('click', closeContextMenu))
           <!-- 5. View Node -->
           <div
             v-else-if="node.kind === 'view'"
-            class="w-full h-full flex items-center gap-1.5 pr-2 rounded-md cursor-pointer hover:bg-subtle"
+            :data-selected="isActiveBrowseNode(node) ? 'true' : undefined"
+            class="w-full h-full flex items-center gap-1.5 pr-2 rounded-md cursor-pointer transition-colors"
+            :class="isActiveBrowseNode(node) ? 'bg-accent-soft text-accent-text font-medium' : 'hover:bg-subtle'"
             :style="{ paddingLeft: `${indentPx(node.depth)}px` }"
-            title="双击实时浏览视图"
+            :title="`${node.view.name} - 双击实时浏览视图`"
             @dblclick="wsStore.openTableBrowse(node.connId, node.db, node.schema, node.view.name)"
           >
             <Eye class="w-3.5 h-3.5 shrink-0 text-accent-text" />
-            <span class="truncate flex-1 text-ink-secondary">{{ node.view.name }}</span>
+            <span class="truncate flex-1" :class="isActiveBrowseNode(node) ? 'text-accent-text' : 'text-ink-secondary'">
+              {{ node.view.name }}
+            </span>
           </div>
 
           <!-- 6. Sequence Node -->
