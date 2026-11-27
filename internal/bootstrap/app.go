@@ -12,19 +12,19 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
-	"sql-manager/internal/binding"
-	"sql-manager/internal/config"
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/mysql"
-	"sql-manager/internal/driver/postgres"
-	"sql-manager/internal/driver/sqlite"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/secret"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
-	"sql-manager/internal/tunnel"
+	"hesper/internal/binding"
+	"hesper/internal/config"
+	"hesper/internal/driver"
+	"hesper/internal/driver/mysql"
+	"hesper/internal/driver/postgres"
+	"hesper/internal/driver/sqlite"
+	"hesper/internal/dto"
+	"hesper/internal/repository"
+	"hesper/internal/resultbuf"
+	"hesper/internal/secret"
+	"hesper/internal/service"
+	"hesper/internal/session"
+	"hesper/internal/tunnel"
 )
 
 func init() {
@@ -74,7 +74,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 
 	// Optional port override for headless `-tags server` mode.
 	serverPort := 8080
-	if p := os.Getenv("SQL_MANAGER_PORT"); p != "" {
+	if p := os.Getenv("HESPER_PORT"); p != "" {
 		if parsed, convErr := strconv.Atoi(p); convErr == nil && parsed > 0 {
 			serverPort = parsed
 		}
@@ -82,7 +82,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 
 	// 7. Create Wails v3 application.
 	app := application.New(application.Options{
-		Name:        "SQL Manager",
+		Name:        "Hesper",
 		Description: "Lightweight cross-platform desktop database workbench for MySQL, PostgreSQL, MariaDB & SQLite",
 		LogLevel:    slog.LevelWarn,
 		Services: []application.Service{
@@ -118,7 +118,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 
 	mainWin := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             "main",
-		Title:            "SQL Manager",
+		Title:            "Hesper",
 		Width:            1360,
 		Height:           860,
 		MinWidth:         960,

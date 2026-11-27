@@ -10,12 +10,12 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/sqlite"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
+	"hesper/internal/driver"
+	"hesper/internal/driver/sqlite"
+	"hesper/internal/dto"
+	"hesper/internal/resultbuf"
+	"hesper/internal/service"
+	"hesper/internal/session"
 )
 
 func seedSQLiteTestFile(t *testing.T) string {

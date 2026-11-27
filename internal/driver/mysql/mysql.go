@@ -16,8 +16,8 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 const (

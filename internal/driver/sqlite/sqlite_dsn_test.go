@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 func TestBuildFileURI_CrossPlatformAuthorityAndEscaping(t *testing.T) {

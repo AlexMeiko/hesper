@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"sql-manager/internal/dto"
-	"sql-manager/internal/tunnel"
+	"hesper/internal/dto"
+	"hesper/internal/tunnel"
 )
 
 type runtimeSSHSecretKey struct{}

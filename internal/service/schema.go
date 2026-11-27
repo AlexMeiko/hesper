@@ -3,9 +3,9 @@ package service
 import (
 	"context"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/session"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/session"
 )
 
 // SchemaService uses Track A (independent metadata pool) to browse databases, schemas, tables, views,

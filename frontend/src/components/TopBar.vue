@@ -45,7 +45,7 @@ const activeContext = computed(() => {
         <div class="w-6 h-6 rounded-md bg-accent text-white flex items-center justify-center">
           <Database class="w-3.5 h-3.5" />
         </div>
-        <span class="font-semibold text-sm tracking-tight text-ink">SQL Manager</span>
+        <span class="font-semibold text-sm tracking-tight text-ink">Hesper</span>
       </div>
 
       <button type="button" class="btn" @click="uiStore.openNewConnectionModal()">

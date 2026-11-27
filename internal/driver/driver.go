@@ -6,7 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 // ResolvedConfig carries complete decrypted parameters needed by a driver Opener.

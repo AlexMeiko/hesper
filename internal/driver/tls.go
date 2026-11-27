@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 // NormalizeTLSMode canonicalizes a TLS mode string, defaulting empty to "disable".

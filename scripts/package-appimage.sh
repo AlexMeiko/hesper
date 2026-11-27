@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${VERSION:-0.1.0}"
 ARCH="${ARCH:-x86_64}"
-BIN_PATH="${ROOT_DIR}/bin/sql-manager"
+BIN_PATH="${ROOT_DIR}/bin/hesper"
 APPDIR="${ROOT_DIR}/build/linux/AppDir"
 OUT_DIR="${ROOT_DIR}/dist"
-OUT_APPIMAGE="${OUT_DIR}/SQL-Manager-${VERSION}-${ARCH}.AppImage"
+OUT_APPIMAGE="${OUT_DIR}/Hesper-${VERSION}-${ARCH}.AppImage"
 
 APPIMAGETOOL="${APPIMAGETOOL:-$(command -v appimagetool || echo "${HOME}/.local/bin/appimagetool")}"
 if [[ ! -x "${APPIMAGETOOL}" ]]; then
@@ -23,7 +23,7 @@ if [[ ! -x "${BIN_PATH}" ]]; then
 fi
 
 # Ensure crisp 256x256 PNG icon exists (renders clean rounded blue database icon if missing)
-PNG_ICON="${ROOT_DIR}/build/linux/sql-manager.png"
+PNG_ICON="${ROOT_DIR}/build/linux/hesper.png"
 if [[ ! -f "${PNG_ICON}" ]]; then
   echo "==> Generating 256x256 PNG icon..."
   python3 - "${PNG_ICON}" <<'PYEOF'
@@ -93,21 +93,21 @@ mkdir -p \
   "${APPDIR}/usr/share/icons/hicolor/scalable/apps" \
   "${APPDIR}/usr/share/metainfo"
 
-install -m 0755 "${BIN_PATH}" "${APPDIR}/usr/bin/sql-manager"
-install -m 0644 "${ROOT_DIR}/build/linux/sql-manager.desktop" "${APPDIR}/sql-manager.desktop"
-install -m 0644 "${ROOT_DIR}/build/linux/sql-manager.desktop" "${APPDIR}/usr/share/applications/sql-manager.desktop"
-install -m 0644 "${PNG_ICON}" "${APPDIR}/sql-manager.png"
-install -m 0644 "${PNG_ICON}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/sql-manager.png"
-install -m 0644 "${ROOT_DIR}/build/linux/sql-manager.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/sql-manager.svg"
-install -m 0644 "${ROOT_DIR}/build/linux/io.sqlmanager.app.metainfo.xml" "${APPDIR}/usr/share/metainfo/io.sqlmanager.app.metainfo.xml"
-ln -sf sql-manager.png "${APPDIR}/.DirIcon"
+install -m 0755 "${BIN_PATH}" "${APPDIR}/usr/bin/hesper"
+install -m 0644 "${ROOT_DIR}/build/linux/hesper.desktop" "${APPDIR}/hesper.desktop"
+install -m 0644 "${ROOT_DIR}/build/linux/hesper.desktop" "${APPDIR}/usr/share/applications/hesper.desktop"
+install -m 0644 "${PNG_ICON}" "${APPDIR}/hesper.png"
+install -m 0644 "${PNG_ICON}" "${APPDIR}/usr/share/icons/hicolor/256x256/apps/hesper.png"
+install -m 0644 "${ROOT_DIR}/build/linux/hesper.svg" "${APPDIR}/usr/share/icons/hicolor/scalable/apps/hesper.svg"
+install -m 0644 "${ROOT_DIR}/build/linux/io.hesper.app.metainfo.xml" "${APPDIR}/usr/share/metainfo/io.hesper.app.metainfo.xml"
+ln -sf hesper.png "${APPDIR}/.DirIcon"
 
 cat > "${APPDIR}/AppRun" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
-BIN="${HERE}/usr/bin/sql-manager"
+BIN="${HERE}/usr/bin/hesper"
 
 show_error_dialog() {
   local title="$1"
@@ -149,12 +149,12 @@ if command -v ldd >/dev/null 2>&1; then
   UNDEF_SYM="$(printf '%s\n' "${LDD_OUT}" | grep -E "^undefined symbol:" | head -n 5 || true)"
 
   if [[ -n "${MISSING}" || -n "${GLIBC_ERR}" || -n "${UNDEF_SYM}" ]]; then
-    MSG="无法启动 SQL Manager，当前系统缺少必要的运行时依赖（需 GTK4 + WebKitGTK 6.0）。"
+    MSG="无法启动 Hesper，当前系统缺少必要的运行时依赖 (需 GTK4 + WebKitGTK 6.0)。"
     if [[ -n "${MISSING}" ]]; then
       MSG+=$'\n\n缺失的动态库：\n'"${MISSING}"
     fi
     if [[ -n "${GLIBC_ERR}" ]]; then
-      MSG+=$'\n\nGLIBC 版本过低（需 GLIBC >= 2.34）：\n'"${GLIBC_ERR}"
+      MSG+=$'\n\nGLIBC 版本过低 (需 GLIBC >= 2.34)：\n'"${GLIBC_ERR}"
     fi
     if [[ -n "${UNDEF_SYM}" ]]; then
       MSG+=$'\n\n运行库符号版本不匹配：\n'"${UNDEF_SYM}"
@@ -162,7 +162,7 @@ if command -v ldd >/dev/null 2>&1; then
     MSG+=$'\n\n请按您的发行版安装 GTK4 与 WebKitGTK 6.0 运行库后重试：\n'
     MSG+=$'• Ubuntu 24.04+ / Debian 13+:\n  sudo apt install libgtk-4-1 libwebkitgtk-6.0-4\n'
     MSG+=$'• CachyOS / Arch Linux:\n  sudo pacman -S gtk4 webkitgtk-6.0'
-    show_error_dialog "SQL Manager — 缺少系统运行库" "${MSG}"
+    show_error_dialog "Hesper — 缺少系统运行库" "${MSG}"
     exit 127
   fi
 fi
@@ -173,7 +173,7 @@ chmod +x "${APPDIR}/AppRun"
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
   echo "==> Validating desktop entry..."
-  desktop-file-validate "${APPDIR}/sql-manager.desktop"
+  desktop-file-validate "${APPDIR}/hesper.desktop"
 fi
 
 mkdir -p "${OUT_DIR}"

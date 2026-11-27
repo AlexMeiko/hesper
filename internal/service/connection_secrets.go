@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"sql-manager/internal/dto"
-	"sql-manager/internal/entity"
-	"sql-manager/internal/secret"
+	"hesper/internal/dto"
+	"hesper/internal/entity"
+	"hesper/internal/secret"
 )
 
 // SecretStore is the minimal credential store contract satisfied by *secret.Store.

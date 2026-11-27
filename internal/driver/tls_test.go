@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 type testPKI struct {

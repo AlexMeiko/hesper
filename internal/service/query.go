@@ -11,13 +11,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/entity"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/session"
-	"sql-manager/internal/sqlsplit"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/entity"
+	"hesper/internal/repository"
+	"hesper/internal/resultbuf"
+	"hesper/internal/session"
+	"hesper/internal/sqlsplit"
 )
 
 // QueryService orchestrates live table browsing (Track A), Execute-Once SQL execution (Track B),

@@ -17,13 +17,13 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/entity"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/secret"
-	"sql-manager/internal/session"
-	"sql-manager/internal/tunnel"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/entity"
+	"hesper/internal/repository"
+	"hesper/internal/secret"
+	"hesper/internal/session"
+	"hesper/internal/tunnel"
 )
 
 type memSecretStore struct {

@@ -15,33 +15,33 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as dto$0 from "../dto/models.js";
 
 export function FetchCompletionCatalog(connID: string, db: string, schema: string): $CancellablePromise<dto$0.CompletionCatalog | null> {
-    return $Call.ByID(1270863770, connID, db, schema);
+    return $Call.ByID(1615561033, connID, db, schema);
 }
 
 export function GetTableDDL(connID: string, db: string, schema: string, table: string): $CancellablePromise<string> {
-    return $Call.ByID(1632166489, connID, db, schema, table);
+    return $Call.ByID(3160376776, connID, db, schema, table);
 }
 
 export function GetTableDetail(connID: string, db: string, schema: string, table: string): $CancellablePromise<dto$0.TableDetail | null> {
-    return $Call.ByID(3999553294, connID, db, schema, table);
+    return $Call.ByID(3287590909, connID, db, schema, table);
 }
 
 export function ListDatabases(connID: string): $CancellablePromise<dto$0.DatabaseInfo[] | null> {
-    return $Call.ByID(2646649311, connID);
+    return $Call.ByID(4163787710, connID);
 }
 
 export function ListSchemas(connID: string, db: string): $CancellablePromise<string[] | null> {
-    return $Call.ByID(230831205, connID, db);
+    return $Call.ByID(72656612, connID, db);
 }
 
 export function ListSequences(connID: string, db: string, schema: string): $CancellablePromise<dto$0.ObjectSummary[] | null> {
-    return $Call.ByID(2405061139, connID, db, schema);
+    return $Call.ByID(3941591934, connID, db, schema);
 }
 
 export function ListTables(connID: string, db: string, schema: string): $CancellablePromise<dto$0.TableSummary[] | null> {
-    return $Call.ByID(1574255874, connID, db, schema);
+    return $Call.ByID(1870658513, connID, db, schema);
 }
 
 export function ListViews(connID: string, db: string, schema: string): $CancellablePromise<dto$0.ObjectSummary[] | null> {
-    return $Call.ByID(247628719, connID, db, schema);
+    return $Call.ByID(2363751754, connID, db, schema);
 }

@@ -13,8 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 func TestConfigureTLSClearsFallbacksAndHonorsModes(t *testing.T) {

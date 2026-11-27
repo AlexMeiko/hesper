@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 // Options configures ResultBuffer thresholds, spill limits, and snapshot TTL.
@@ -43,7 +43,7 @@ func (o Options) withDefaults() Options {
 		o.IdleTTL = 30 * time.Minute
 	}
 	if o.SpillDir == "" {
-		o.SpillDir = filepath.Join(os.TempDir(), "sql-manager-results")
+		o.SpillDir = filepath.Join(os.TempDir(), "hesper-results")
 	}
 	return o
 }

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"sql-manager/internal/entity"
-	appsql "sql-manager/sql"
+	"hesper/internal/entity"
+	appsql "hesper/sql"
 
 	_ "modernc.org/sqlite"
 )

@@ -15,7 +15,7 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-const keyringService = "sql-manager"
+const keyringService = "hesper"
 
 // Store manages sensitive credentials (database passwords, SSH passphrases).
 // Uses OS keyring (Windows Credential Manager / Linux Secret Service) first,

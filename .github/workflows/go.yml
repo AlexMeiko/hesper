@@ -83,15 +83,15 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           mkdir -p bin
-          go build -tags production -trimpath -ldflags="-s -w" -o bin/sql-manager .
+          go build -tags production -trimpath -ldflags="-s -w" -o bin/hesper .
           bash scripts/package-appimage.sh
 
       - name: Upload Linux AppImage artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sql-manager-linux-x86_64
+          name: hesper-linux-x86_64
           path: |
-            dist/SQL-Manager-*-x86_64.AppImage
+            dist/Hesper-*-x86_64.AppImage
             dist/SHA256SUMS
           if-no-files-found: error
 
@@ -152,10 +152,10 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path "dist\stage" | Out-Null
-          go build -tags production -trimpath -ldflags="-s -w -H=windowsgui" -o "dist\stage\sql-manager.exe" .
-          # 如需默认绿色便携模式（数据写入同目录 data/ 而非 %APPDATA%），取消下一行注释：
+          go build -tags production -trimpath -ldflags="-s -w -H=windowsgui" -o "dist\stage\hesper.exe" .
+          # 如需默认绿色便携模式 (数据写入同目录 data/ 而非 %APPDATA%)，取消下一行注释：
           # New-Item -ItemType File -Force -Path "dist\stage\portable.flag" | Out-Null
-          $zipName = "SQL-Manager-$env:VERSION-windows-x86_64.zip"
+          $zipName = "Hesper-$env:VERSION-windows-x86_64.zip"
           $zipPath = "dist\$zipName"
           Compress-Archive -Path "dist\stage\*" -DestinationPath $zipPath -Force
           $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
@@ -164,9 +164,9 @@ jobs:
       - name: Upload Windows Zip artifact
         uses: actions/upload-artifact@v7
         with:
-          name: sql-manager-windows-x86_64
+          name: hesper-windows-x86_64
           path: |
-            dist/SQL-Manager-*-windows-x86_64.zip
+            dist/Hesper-*-windows-x86_64.zip
             dist/SHA256SUMS-windows.txt
           if-no-files-found: error
 

@@ -1,4 +1,4 @@
-module sql-manager
+module hesper
 
 go 1.27.4
 

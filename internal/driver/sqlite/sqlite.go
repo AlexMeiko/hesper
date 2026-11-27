@@ -19,8 +19,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 const (

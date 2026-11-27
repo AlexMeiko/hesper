@@ -17,8 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
 )
 
 const (
@@ -65,7 +65,7 @@ func (o *Opener) Open(ctx context.Context, cfg driver.ResolvedConfig) (driver.Co
 	if pgCfg.RuntimeParams == nil {
 		pgCfg.RuntimeParams = map[string]string{}
 	}
-	pgCfg.RuntimeParams["application_name"] = "sql-manager"
+	pgCfg.RuntimeParams["application_name"] = "hesper"
 	if cfg.ReadOnly {
 		pgCfg.RuntimeParams["default_transaction_read_only"] = "on"
 	}

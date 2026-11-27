@@ -27,9 +27,9 @@ export * from './types'
 
 // Lazy-load Wails binding modules on first actual RPC invocation so importing stores/api in
 // unit tests (where individual api methods are mocked) never initializes @wailsio/runtime.
-const connBinding = () => import('@bindings/sql-manager/internal/binding/connectionbinding')
-const schemaBinding = () => import('@bindings/sql-manager/internal/binding/schemabinding')
-const queryBinding = () => import('@bindings/sql-manager/internal/binding/querybinding')
+const connBinding = () => import('@bindings/hesper/internal/binding/connectionbinding')
+const schemaBinding = () => import('@bindings/hesper/internal/binding/schemabinding')
+const queryBinding = () => import('@bindings/hesper/internal/binding/querybinding')
 
 export function isAppError(err: unknown): err is AppError {
   if (!err || typeof err !== 'object') return false

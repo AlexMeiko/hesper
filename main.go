@@ -6,9 +6,9 @@ import (
 	"io/fs"
 	"os"
 
-	"sql-manager/internal/bootstrap"
-	"sql-manager/internal/config"
-	"sql-manager/internal/platform"
+	"hesper/internal/bootstrap"
+	"hesper/internal/config"
+	"hesper/internal/platform"
 )
 
 //go:embed all:frontend/dist
@@ -17,7 +17,7 @@ var embeddedAssets embed.FS
 func main() {
 	paths, err := config.ResolvePaths()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sql-manager: resolve data paths failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hesper: resolve data paths failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -26,12 +26,12 @@ func main() {
 
 	distFS, err := fs.Sub(embeddedAssets, "frontend/dist")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sql-manager: embedded frontend/dist missing: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hesper: embedded frontend/dist missing: %v\n", err)
 		os.Exit(1)
 	}
 
 	if err := bootstrap.Run(paths, distFS); err != nil {
-		fmt.Fprintf(os.Stderr, "sql-manager: fatal error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "hesper: fatal error: %v\n", err)
 		os.Exit(1)
 	}
 }

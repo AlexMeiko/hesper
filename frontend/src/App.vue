@@ -141,10 +141,10 @@ onUnmounted(() => {
                     <Database class="w-6 h-6" />
                   </div>
                   <h1 class="text-lg font-semibold m-0 text-ink">
-                    欢迎使用 SQL Manager
+                    欢迎使用 Hesper
                   </h1>
                   <p class="text-xs m-0 leading-relaxed text-ink-muted">
-                    面向 MySQL、PostgreSQL、MariaDB 与 SQLite 的轻量桌面查询工作台。每个查询标签独占一条物理连接，表浏览与编辑器一次性快照清晰分离。
+                    长夜有星，数据有序。
                   </p>
                 </div>
 

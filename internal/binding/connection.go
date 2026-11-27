@@ -3,8 +3,8 @@ package binding
 import (
 	"context"
 
-	"sql-manager/internal/dto"
-	"sql-manager/internal/service"
+	"hesper/internal/dto"
+	"hesper/internal/service"
 )
 
 // ConnectionBinding is the Wails v3 boundary adapter for connection management.

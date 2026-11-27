@@ -20,16 +20,16 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/mysql"
-	"sql-manager/internal/driver/postgres"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/secret"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
-	"sql-manager/internal/tunnel"
+	"hesper/internal/driver"
+	"hesper/internal/driver/mysql"
+	"hesper/internal/driver/postgres"
+	"hesper/internal/dto"
+	"hesper/internal/repository"
+	"hesper/internal/resultbuf"
+	"hesper/internal/secret"
+	"hesper/internal/service"
+	"hesper/internal/session"
+	"hesper/internal/tunnel"
 )
 
 type realDBTarget struct {

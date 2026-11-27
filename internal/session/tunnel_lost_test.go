@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/sqlsplit"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/sqlsplit"
 )
 
 type stubSessionDriver struct {

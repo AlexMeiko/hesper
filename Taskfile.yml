@@ -28,13 +28,13 @@ tasks:
     desc: Build native Linux GTK4 + WebKitGTK 6.0 binary
     deps: [bindings, frontend:build]
     cmds:
-      - go build -trimpath -ldflags="-s -w" -o bin/sql-manager .
+      - go build -trimpath -ldflags="-s -w" -o bin/hesper .
 
   build:server:
     desc: Build headless HTTP server binary (Wails v3 server mode)
     deps: [bindings, frontend:build]
     cmds:
-      - go build -tags server -trimpath -ldflags="-s -w" -o bin/sql-manager-server .
+      - go build -tags server -trimpath -ldflags="-s -w" -o bin/hesper-server .
 
   package:appimage:
     desc: Package Linux x86_64 GTK4 Type 2 AppImage into dist/

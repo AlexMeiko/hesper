@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"sql-manager/internal/driver"
+	"hesper/internal/driver"
 )
 
 type testSSHServerOpts struct {

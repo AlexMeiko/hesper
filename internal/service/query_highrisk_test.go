@@ -5,14 +5,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/driver/fake"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/entity"
-	"sql-manager/internal/repository"
-	"sql-manager/internal/resultbuf"
-	"sql-manager/internal/service"
-	"sql-manager/internal/session"
+	"hesper/internal/driver"
+	"hesper/internal/driver/fake"
+	"hesper/internal/dto"
+	"hesper/internal/entity"
+	"hesper/internal/repository"
+	"hesper/internal/resultbuf"
+	"hesper/internal/service"
+	"hesper/internal/session"
 )
 
 func newQueryServiceFixture(t *testing.T) (*service.QueryService, *repository.LocalDB) {

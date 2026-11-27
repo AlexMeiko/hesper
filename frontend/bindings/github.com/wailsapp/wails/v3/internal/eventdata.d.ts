@@ -7,7 +7,7 @@ import type { Events } from "@wailsio/runtime";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
-import type * as dto$0 from "../../../../../sql-manager/internal/dto/models.js";
+import type * as dto$0 from "../../../../../hesper/internal/dto/models.js";
 
 declare module "@wailsio/runtime" {
     namespace Events {

@@ -16,57 +16,57 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as dto$0 from "../dto/models.js";
 
 export function BrowseTable(req: dto$0.BrowseTableRequest): $CancellablePromise<dto$0.BrowseTableResponse | null> {
-    return $Call.ByID(1223447836, req);
+    return $Call.ByID(408349959, req);
 }
 
 export function CancelExecution(tabID: string, execID: string): $CancellablePromise<dto$0.CancelExecutionResponse> {
-    return $Call.ByID(1248575374, tabID, execID);
+    return $Call.ByID(3453571433, tabID, execID);
 }
 
 export function CloseTab(tabID: string): $CancellablePromise<void> {
-    return $Call.ByID(2917970741, tabID);
+    return $Call.ByID(1521803988, tabID);
 }
 
 export function ExecuteSQL(req: dto$0.ExecuteSQLRequest): $CancellablePromise<dto$0.ExecuteSQLResponse | null> {
-    return $Call.ByID(1454760579, req);
+    return $Call.ByID(3967418630, req);
 }
 
 export function FetchResultPage(req: dto$0.FetchResultPageRequest): $CancellablePromise<dto$0.FetchResultPageResponse | null> {
-    return $Call.ByID(1189857116, req);
+    return $Call.ByID(2049974811, req);
 }
 
 export function ForceAbortSession(tabID: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(1417445103, tabID);
+    return $Call.ByID(2409219296, tabID);
 }
 
 export function GetTabSessionInfo(tabID: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(3325934675, tabID);
+    return $Call.ByID(2437879880, tabID);
 }
 
 export function ListHistory(connID: string, limit: number): $CancellablePromise<dto$0.QueryHistoryItem[] | null> {
-    return $Call.ByID(1121289726, connID, limit);
+    return $Call.ByID(928573969, connID, limit);
 }
 
 export function OpenTabSession(tabID: string, connID: string, db: string, schema: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(1028391043, tabID, connID, db, schema);
+    return $Call.ByID(3431385942, tabID, connID, db, schema);
 }
 
 export function OpenTabSessionWithSSHSecret(tabID: string, connID: string, db: string, schema: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(1257720587, tabID, connID, db, schema, sshSecret, saveSecret);
+    return $Call.ByID(79461412, tabID, connID, db, schema, sshSecret, saveSecret);
 }
 
 export function ReconnectTabSession(tabID: string, db: string, schema: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(1592855126, tabID, db, schema);
+    return $Call.ByID(2207286677, tabID, db, schema);
 }
 
 export function ReconnectTabSessionWithSSHSecret(tabID: string, db: string, schema: string, sshSecret: string, saveSecret: boolean): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(501618980, tabID, db, schema, sshSecret, saveSecret);
+    return $Call.ByID(3197326041, tabID, db, schema, sshSecret, saveSecret);
 }
 
 export function SwitchTabDatabase(tabID: string, targetDB: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(1364608508, tabID, targetDB);
+    return $Call.ByID(4001676787, tabID, targetDB);
 }
 
 export function SwitchTabSchema(tabID: string, targetSchema: string): $CancellablePromise<dto$0.TabSessionInfo> {
-    return $Call.ByID(2346800706, tabID, targetSchema);
+    return $Call.ByID(4196775593, tabID, targetSchema);
 }

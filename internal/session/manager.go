@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"sql-manager/internal/driver"
-	"sql-manager/internal/dto"
-	"sql-manager/internal/sqlsplit"
+	"hesper/internal/driver"
+	"hesper/internal/dto"
+	"hesper/internal/sqlsplit"
 )
 
 // ConfigResolver resolves decrypted ResolvedConfig for a given connectionID (and optional override database).

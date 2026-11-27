@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/text/encoding/simplifiedchinese"
 
-	"sql-manager/internal/dto"
+	"hesper/internal/dto"
 )
 
 type stubErrRows struct {
