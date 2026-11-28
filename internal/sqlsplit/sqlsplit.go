@@ -198,13 +198,13 @@ func Split(src string, dialect Dialect) []Statement {
 			atLineStart = true
 			continue
 		}
-		if ch == ' ' || ch == '\t' || ch == '\r' {
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\f' || ch == '\v' {
 			i++
 			continue
 		}
 
 		// Single-line comment: -- ...
-		if ch == '-' && i+1 < n && src[i+1] == '-' && (i+2 == n || src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\r' || src[i+2] == '\n' || dialect != DialectMySQL) {
+		if ch == '-' && i+1 < n && src[i+1] == '-' && (i+2 == n || src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\r' || src[i+2] == '\n' || src[i+2] == '\f' || src[i+2] == '\v' || dialect != DialectMySQL) {
 			i += 2
 			for i < n && src[i] != '\n' {
 				i++
@@ -273,33 +273,14 @@ func Split(src string, dialect Dialect) []Statement {
 		}
 		atLineStart = false
 
-		// Single-quoted string
-		if ch == '\'' {
+		// Single-quoted string (including PostgreSQL E'...' / e'...' escape string literals
+		// and multiline PostgreSQL string continuations preserving escape mode).
+		if next, nl, ok := scanSingleQuotedString(src, i, dialect, false); ok {
 			if delimiter == ";" {
 				tracker.onLiteralOrQuotedIdent()
 			}
-			i++
-			for i < n {
-				if src[i] == '\n' {
-					line++
-				}
-				if dialect == DialectMySQL && src[i] == '\\' && i+1 < n {
-					if src[i+1] == '\n' {
-						line++
-					}
-					i += 2
-					continue
-				}
-				if src[i] == '\'' {
-					if i+1 < n && src[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
+			line += nl
+			i = next
 			continue
 		}
 
@@ -405,6 +386,13 @@ func Split(src string, dialect Dialect) []Statement {
 				tracker.onColon()
 				i++
 				continue
+			}
+			if dialect == DialectMySQL && ch == '@' {
+				if next, isSysVar, ok := scanMySQLAtVar(src, i); ok {
+					tracker.onMySQLAtVar(isSysVar)
+					i = next
+					continue
+				}
 			}
 			r, size := utf8.DecodeRuneInString(src[i:])
 			if isIdentStart(r) || (r >= '0' && r <= '9') {
@@ -520,7 +508,7 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 	for i < n {
 		ch := s[i]
 
-		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f' || ch == '\v' {
 			i++
 			continue
 		}
@@ -533,7 +521,7 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 		}
 
 		// Single-line comment --
-		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || dialect != DialectMySQL) {
+		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || s[i+2] == '\f' || s[i+2] == '\v' || dialect != DialectMySQL) {
 			i += 2
 			for i < n && s[i] != '\n' {
 				i++
@@ -577,24 +565,10 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 			continue
 		}
 
-		// Single-quoted string
-		if ch == '\'' {
-			i++
-			for i < n {
-				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if s[i] == '\'' {
-					if i+1 < n && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
+		// Single-quoted string (including PostgreSQL E'...' / e'...' escape string literals
+		// and multiline PostgreSQL string continuations preserving escape mode).
+		if next, _, ok := scanSingleQuotedString(s, i, dialect, false); ok {
+			i = next
 			continue
 		}
 
@@ -681,6 +655,12 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 			out = append(out, sqlToken{kind: tokComma, upper: ",", depth: depth})
 			i++
 			continue
+		}
+		if dialect == DialectMySQL && ch == '@' {
+			if next, _, ok := scanMySQLAtVar(s, i); ok {
+				i = next
+				continue
+			}
 		}
 
 		r, size := utf8.DecodeRuneInString(s[i:])
@@ -1273,19 +1253,22 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 	b.Grow(len(s))
 	n := len(s)
 	inExecComment := false
+	prevWasIdent := false
 	for i := 0; i < n; {
 		ch := s[i]
 		if inExecComment && ch == '*' && i+1 < n && s[i+1] == '/' {
 			inExecComment = false
 			i += 2
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
-		if ch == '-' && i+1 < n && s[i+1] == '-' {
+		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || s[i+2] == '\f' || s[i+2] == '\v' || dialect != DialectMySQL) {
 			for i < n && s[i] != '\n' {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
 		if dialect == DialectMySQL && ch == '#' {
@@ -1293,6 +1276,7 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
 		if ch == '/' && i+1 < n && s[i+1] == '*' {
@@ -1301,6 +1285,7 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 					inExecComment = true
 					i += prefixLen
 					b.WriteByte(' ')
+					prevWasIdent = false
 					continue
 				}
 			}
@@ -1320,17 +1305,17 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
-		if ch == '\'' {
+		// Preserve backtick-quoted identifiers verbatim (MySQL / SQLite) so comment markers
+		// such as '--' or '#' inside quoted labels/identifiers are never stripped as comments.
+		if ch == '`' && dialect != DialectPostgres {
+			start := i
 			i++
 			for i < n {
-				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if s[i] == '\'' {
-					if i+1 < n && s[i+1] == '\'' {
+				if s[i] == '`' {
+					if i+1 < n && s[i+1] == '`' {
 						i += 2
 						continue
 					}
@@ -1339,11 +1324,142 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				}
 				i++
 			}
-			b.WriteByte(' ')
+			b.WriteString(s[start:i])
+			prevWasIdent = true
 			continue
 		}
-		b.WriteByte(ch)
-		i++
+		if next, _, ok := scanSingleQuotedString(s, i, dialect, prevWasIdent); ok {
+			i = next
+			b.WriteByte(' ')
+			prevWasIdent = false
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteString(s[i : i+size])
+		prevWasIdent = isIdentPart(r) || r == '$'
+		i += size
 	}
 	return b.String()
+}
+
+// scanSingleQuotedString scans a single-quoted string literal starting at s[start], including
+// PostgreSQL E'...' / e'...' escape string literals and PostgreSQL multiline continuations
+// (where subsequent '...' segments separated by whitespace / '--' comments containing at least
+// one newline inherit the initial escape-string mode).
+// Returns the byte offset after the closing quote, the count of '\n' bytes consumed, and ok=true.
+func scanSingleQuotedString(s string, start int, dialect Dialect, prevWasIdent bool) (next int, newlines int, ok bool) {
+	n := len(s)
+	if start >= n {
+		return start, 0, false
+	}
+	ch := s[start]
+	isPGEscape := dialect == DialectPostgres && !prevWasIdent && (ch == 'E' || ch == 'e') && start+1 < n && s[start+1] == '\''
+	if ch != '\'' && !isPGEscape {
+		return start, 0, false
+	}
+
+	i := start + 1
+	if isPGEscape {
+		i = start + 2
+	}
+	allowBackslashEscape := dialect == DialectMySQL || isPGEscape
+
+	for {
+		closed := false
+		for i < n {
+			if s[i] == '\n' {
+				newlines++
+			}
+			if allowBackslashEscape && s[i] == '\\' && i+1 < n {
+				if s[i+1] == '\n' {
+					newlines++
+				}
+				i += 2
+				continue
+			}
+			if s[i] == '\'' {
+				if i+1 < n && s[i+1] == '\'' {
+					i += 2
+					continue
+				}
+				i++
+				closed = true
+				break
+			}
+			i++
+		}
+		if !closed || dialect != DialectPostgres {
+			return i, newlines, true
+		}
+
+		// PostgreSQL continues a string constant across lines when separated by whitespace and/or
+		// '--' comments containing at least one newline ('\n' or '\r'). The continuation segment
+		// inherits allowBackslashEscape from the opening E'...' / '...' segment.
+		j := i
+		sepNewlines := 0
+		sawNewline := false
+		for j < n {
+			switch s[j] {
+			case '\n':
+				sawNewline = true
+				sepNewlines++
+				j++
+			case '\r':
+				sawNewline = true
+				j++
+			case ' ', '\t', '\f', '\v':
+				j++
+			case '-':
+				if j+1 < n && s[j+1] == '-' {
+					j += 2
+					for j < n && s[j] != '\n' && s[j] != '\r' {
+						j++
+					}
+					continue
+				}
+				goto noContinuation
+			default:
+				goto noContinuation
+			}
+		}
+	noContinuation:
+		if sawNewline && j < n && s[j] == '\'' {
+			newlines += sepNewlines
+			i = j + 1
+			continue
+		}
+		return i, newlines, true
+	}
+}
+
+// scanMySQLAtVar scans an unquoted MySQL/MariaDB user or system variable token starting at '@'
+// (e.g. @do, @a.do, @@session.var). Quoted forms (@'...', @"...", @`...`) are not matched here
+// because their following quote is already scanned as a literal or quoted identifier token.
+func scanMySQLAtVar(s string, start int) (next int, isSysVar bool, ok bool) {
+	n := len(s)
+	if start >= n || s[start] != '@' {
+		return start, false, false
+	}
+	j := start + 1
+	if j < n && s[j] == '@' {
+		isSysVar = true
+		j++
+	}
+	if j >= n {
+		return start, false, false
+	}
+	r, size := utf8.DecodeRuneInString(s[j:])
+	if !(isIdentStart(r) || (r >= '0' && r <= '9') || r == '$' || r == '.') {
+		return start, false, false
+	}
+	j += size
+	for j < n {
+		nr, nsize := utf8.DecodeRuneInString(s[j:])
+		if isIdentPart(nr) || nr == '$' || nr == '.' {
+			j += nsize
+			continue
+		}
+		break
+	}
+	return j, isSysVar, true
 }

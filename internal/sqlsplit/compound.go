@@ -46,6 +46,7 @@ const (
 	modeMySQLBeginNot
 	modeMySQLCreate
 	modeMySQLCreateOr
+	modeMySQLCreateAggregate
 	modeMySQLDefiner
 	modeMySQLAlter
 	modeMySQLTriggerHeader
@@ -61,6 +62,14 @@ const (
 	modeMySQLCompoundEnded
 	modeMySQLUnsupportedCompound
 	modeMySQLUnsupportedAnonymous
+)
+
+type mysqlBeginLookahead uint8
+
+const (
+	mysqlBeginNone mysqlBeginLookahead = iota
+	mysqlBeginSawBegin
+	mysqlBeginSawNot
 )
 
 type definerPhase uint8
@@ -136,7 +145,7 @@ type compoundTracker struct {
 	mysqlExprCaseDepth         int
 	mysqlAfterDot              bool
 	mysqlPendingEnd            bool
-	mysqlPendingBegin          bool
+	mysqlBeginLook             mysqlBeginLookahead
 	mysqlIsAnonBlock           bool
 	execCommentSawTrailingSemi bool
 	execCommentAmbiguous       bool
@@ -176,7 +185,7 @@ func (t *compoundTracker) enterMySQLCompoundBlock(isAnon bool) {
 	t.mysqlExprCaseDepth = 0
 	t.mysqlAfterDot = false
 	t.mysqlPendingEnd = false
-	t.mysqlPendingBegin = false
+	t.mysqlBeginLook = mysqlBeginNone
 	t.mysqlIsAnonBlock = isAnon
 }
 
@@ -236,7 +245,7 @@ func (t *compoundTracker) onLParen() {
 	}
 	if t.mode == modeMySQLBodyLabelOrSimple || t.mode == modeMySQLLabelCandidate ||
 		t.mode == modeMySQLLabelAfterColon || t.mode == modeMySQLBeginCheck || t.mode == modeMySQLBeginNot ||
-		t.mode == modeMySQLAlter ||
+		t.mode == modeMySQLCreateAggregate || t.mode == modeMySQLAlter ||
 		t.mode == modeSQLiteExplain || t.mode == modeSQLiteExplainQuery || t.mode == modeSQLiteAfterExplainPlan {
 		t.mode = modeNormal
 	}
@@ -294,7 +303,8 @@ func (t *compoundTracker) onColon() {
 			t.mysqlAtStmtStart = false
 		}
 	case modeMySQLTriggerAfterRow, modeMySQLBeginCheck, modeMySQLBeginNot, modeMySQLLabelAfterColon,
-		modeMySQLAlter, modeMySQLDefiner, modeSQLiteExplain, modeSQLiteExplainQuery, modeSQLiteAfterExplainPlan:
+		modeMySQLCreateAggregate, modeMySQLAlter, modeMySQLDefiner,
+		modeSQLiteExplain, modeSQLiteExplainQuery, modeSQLiteAfterExplainPlan:
 		t.mode = modeNormal
 	}
 }
@@ -355,7 +365,7 @@ func (t *compoundTracker) onSymbol(ch byte) {
 			t.eventPhase = eventWaitQualName
 		}
 	case modeMySQLTriggerAfterRow, modeMySQLBodyLabelOrSimple, modeMySQLLabelCandidate, modeMySQLLabelAfterColon,
-		modeMySQLBeginCheck, modeMySQLBeginNot, modeMySQLCreate, modeMySQLCreateOr, modeMySQLAlter,
+		modeMySQLBeginCheck, modeMySQLBeginNot, modeMySQLCreate, modeMySQLCreateOr, modeMySQLCreateAggregate, modeMySQLAlter,
 		modeSQLiteCreate, modeSQLiteExplain, modeSQLiteExplainQuery, modeSQLiteAfterExplainPlan,
 		modePGCreate, modePGCreateOr:
 		t.mode = modeNormal
@@ -377,7 +387,7 @@ func (t *compoundTracker) onLiteralOrQuotedIdent() {
 			t.mode = modeNormal
 		}
 	case modeSQLiteCreate, modeSQLiteExplain, modeSQLiteExplainQuery, modeSQLiteAfterExplainPlan,
-		modePGCreate, modePGCreateOr, modeMySQLCreate, modeMySQLCreateOr, modeMySQLAlter,
+		modePGCreate, modePGCreateOr, modeMySQLCreate, modeMySQLCreateOr, modeMySQLCreateAggregate, modeMySQLAlter,
 		modeMySQLLabelCandidate, modeMySQLLabelAfterColon, modeMySQLBeginCheck, modeMySQLBeginNot,
 		modeMySQLBodyLabelOrSimple:
 		t.mode = modeNormal
@@ -449,6 +459,19 @@ func (t *compoundTracker) onLiteralOrQuotedIdent() {
 	case modeMySQLBodyStart:
 		t.mode = modeMySQLBodyLabelOrSimple
 	}
+}
+
+// onMySQLAtVar consumes an unquoted MySQL/MariaDB @var or @@var lexical unit.
+// When immediately following a DEFINER user name (e.g. DEFINER=user@localhost or user@do),
+// a single-@ token advances the DEFINER account parser directly into defInHost; everywhere
+// else it behaves as a non-keyword value token so names like @do or @end never match keywords.
+func (t *compoundTracker) onMySQLAtVar(isSysVar bool) {
+	if !isSysVar && t.mode == modeMySQLDefiner && t.parenDepth == 0 && t.definerPhase == defAfterUser {
+		t.mysqlAfterDot = false
+		t.definerPhase = defInHost
+		return
+	}
+	t.onLiteralOrQuotedIdent()
 }
 
 func (t *compoundTracker) onWord(upper string) {
@@ -635,6 +658,8 @@ func (t *compoundTracker) onMySQLWord(upper string) {
 			t.mode = modeMySQLCreateOr
 		case "DEFINER":
 			t.enterMySQLDefiner(modeMySQLCreate)
+		case "AGGREGATE":
+			t.mode = modeMySQLCreateAggregate
 		case "TRIGGER":
 			t.mode = modeMySQLTriggerHeader
 			t.triggerSeq = 0
@@ -653,6 +678,14 @@ func (t *compoundTracker) onMySQLWord(upper string) {
 	case modeMySQLCreateOr:
 		if upper == "REPLACE" {
 			t.mode = modeMySQLCreate
+		} else {
+			t.mode = modeNormal
+		}
+
+	case modeMySQLCreateAggregate:
+		if upper == "FUNCTION" {
+			t.mode = modeMySQLFuncHeader
+			t.funcPhase = funcWaitParams
 		} else {
 			t.mode = modeNormal
 		}
@@ -884,7 +917,7 @@ func (t *compoundTracker) onMySQLCompoundBodyWord(upper string) {
 	}
 
 	if upper == "BEGIN" && (atStart || inHandler) {
-		t.mysqlPendingBegin = true
+		t.mysqlBeginLook = mysqlBeginSawBegin
 		t.mysqlAtStmtStart = false
 		return
 	}
@@ -941,24 +974,46 @@ const (
 	eventEOF
 )
 
-// resolveMySQLPending resolves 1-token lookahead after a statement-level BEGIN or END inside modeMySQLCompoundBody.
+// resolveMySQLPending resolves lookahead after a statement-level BEGIN (including MariaDB nested
+// BEGIN NOT ATOMIC) or END inside modeMySQLCompoundBody.
 // Returns true if the current event was fully consumed by the lookahead resolution.
 func (t *compoundTracker) resolveMySQLPending(ev trackerEventKind, word string) bool {
 	if t.mode != modeMySQLCompoundBody {
 		return false
 	}
 
-	if t.mysqlPendingBegin {
-		t.mysqlPendingBegin = false
+	switch t.mysqlBeginLook {
+	case mysqlBeginSawBegin:
 		if ev == eventWord && word == "WORK" {
+			t.mysqlBeginLook = mysqlBeginNone
 			return true
 		}
 		if ev == eventSemi {
+			t.mysqlBeginLook = mysqlBeginNone
 			return false
 		}
+		if ev == eventWord && word == "NOT" {
+			// Could be MariaDB nested "BEGIN NOT ATOMIC ... END"; wait for ATOMIC before dispatching first body statement.
+			t.mysqlBeginLook = mysqlBeginSawNot
+			return true
+		}
+		t.mysqlBeginLook = mysqlBeginNone
 		t.mysqlBeginDepth++
 		t.resetMySQLInnerStmt()
 		// Do not consume ev; let caller process the first token inside the nested BEGIN block.
+
+	case mysqlBeginSawNot:
+		t.mysqlBeginLook = mysqlBeginNone
+		t.mysqlBeginDepth++
+		t.resetMySQLInnerStmt()
+		if ev == eventWord && word == "ATOMIC" {
+			// Consumed full "BEGIN NOT ATOMIC" opener; the next token starts the first inner statement at statement start.
+			return true
+		}
+		// Malformed "BEGIN NOT <other>": keep depth incremented and record "NOT" as first body token.
+		t.mysqlStmtFirstWord = "NOT"
+		t.mysqlAtStmtStart = false
+		t.mysqlStmtWordCount = 1
 	}
 
 	if !t.mysqlPendingEnd {
@@ -1060,7 +1115,7 @@ func isMySQLUnsupportedAnonBlockRaw(stmt string) bool {
 	i := 0
 	n := len(stripped)
 	skipWS := func() {
-		for i < n && (stripped[i] == ' ' || stripped[i] == '\t' || stripped[i] == '\r' || stripped[i] == '\n') {
+		for i < n && (stripped[i] == ' ' || stripped[i] == '\t' || stripped[i] == '\r' || stripped[i] == '\n' || stripped[i] == '\f' || stripped[i] == '\v') {
 			i++
 		}
 	}
