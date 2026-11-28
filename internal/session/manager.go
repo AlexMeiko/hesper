@@ -31,6 +31,7 @@ type Manager struct {
 	resolve  ConfigResolver
 
 	epochSeq atomic.Int64
+	opSeq    atomic.Uint64
 
 	mu                   sync.Mutex
 	metaMaxIdle          int
@@ -38,6 +39,8 @@ type Manager struct {
 	metaPools            map[string]*metaPool   // key: connID + "\x00" + db
 	tabs                 map[string]*TabSession // key: tabID
 	invalidatedTunnelGen map[string]uint64      // highest invalidated SSH tunnel generation per connID
+	connLifecycle        map[string]uint64      // monotonically increasing lifecycle epoch per connID
+	inFlightOps          map[string]*managedOp  // active short-lived managed operations (incl. dialing)
 	onStateChanged       func(dto.SessionStateEvent)
 }
 
@@ -50,6 +53,8 @@ func NewManager(registry *driver.Registry, resolve ConfigResolver) *Manager {
 		metaPools:            make(map[string]*metaPool),
 		tabs:                 make(map[string]*TabSession),
 		invalidatedTunnelGen: make(map[string]uint64),
+		connLifecycle:        make(map[string]uint64),
+		inFlightOps:          make(map[string]*managedOp),
 	}
 }
 
@@ -232,7 +237,10 @@ func (m *Manager) MarkConnectionLost(connID string, lostGen uint64) {
 			tabs = append(tabs, ts)
 		}
 	}
+	opHandles := m.detachOpsForTunnelLocked(connID, lostGen)
 	m.mu.Unlock()
+
+	abortOpHandles(opHandles)
 
 	for _, p := range pools {
 		if lostGen == 0 {
@@ -247,9 +255,11 @@ func (m *Manager) MarkConnectionLost(connID string, lostGen uint64) {
 	}
 }
 
-// CloseConnection closes every Track A metadata pool and Track B tab session belonging to connID.
+// CloseConnection closes every Track A metadata pool, Track B tab session, and active short-lived
+// managed operation belonging to connID, while incrementing connLifecycle so older plans invalidate naturally.
 func (m *Manager) CloseConnection(connID string) {
 	m.mu.Lock()
+	m.connLifecycle[connID]++
 	var pools []*metaPool
 	for k, p := range m.metaPools {
 		if p.connID == connID {
@@ -264,7 +274,10 @@ func (m *Manager) CloseConnection(connID string) {
 			delete(m.tabs, id)
 		}
 	}
+	opHandles := m.detachOpsForConnectionLocked(connID)
 	m.mu.Unlock()
+
+	abortOpHandles(opHandles)
 
 	for _, ts := range tabs {
 		_ = ts.Close()
@@ -274,20 +287,39 @@ func (m *Manager) CloseConnection(connID string) {
 	}
 }
 
-// CloseAll closes all connections across all pools and tabs (called on app shutdown).
+// CloseAll closes all connections across all pools, tabs, and managed operations (called on app shutdown).
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
+	seenConnIDs := make(map[string]struct{}, len(m.connLifecycle)+len(m.metaPools)+len(m.tabs)+len(m.inFlightOps))
+	for cid := range m.connLifecycle {
+		seenConnIDs[cid] = struct{}{}
+	}
 	pools := make([]*metaPool, 0, len(m.metaPools))
 	for k, p := range m.metaPools {
+		seenConnIDs[p.connID] = struct{}{}
 		pools = append(pools, p)
 		delete(m.metaPools, k)
 	}
 	tabs := make([]*TabSession, 0, len(m.tabs))
 	for id, ts := range m.tabs {
+		seenConnIDs[ts.connID] = struct{}{}
 		tabs = append(tabs, ts)
 		delete(m.tabs, id)
 	}
+	opHandles := make([]abortedOpHandle, 0, len(m.inFlightOps))
+	for id, op := range m.inFlightOps {
+		seenConnIDs[op.connID] = struct{}{}
+		op.aborted = true
+		op.abortedByLifecycle = true
+		opHandles = append(opHandles, abortedOpHandle{cancel: op.cancel})
+		delete(m.inFlightOps, id)
+	}
+	for cid := range seenConnIDs {
+		m.connLifecycle[cid]++
+	}
 	m.mu.Unlock()
+
+	abortOpHandles(opHandles)
 
 	for _, ts := range tabs {
 		_ = ts.Close()
