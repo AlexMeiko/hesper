@@ -20,6 +20,31 @@ export interface AppError {
     "sshAuthPrompt"?: SSHAuthPrompt | null;
     "credentialSaved"?: boolean;
     "saveWarning"?: string;
+    "conflictRowKey"?: string;
+}
+
+/**
+ * ApplyGridChangesRequest executes a previously previewed immutable plan by its planID.
+ */
+export interface ApplyGridChangesRequest {
+    "connectionId": string;
+    "planId": string;
+}
+
+/**
+ * ApplyGridChangesResponse reports the final result of ApplyGridChanges.
+ */
+export interface ApplyGridChangesResponse {
+    "planId": string;
+    "outcome": GridApplyOutcome;
+    "appliedCount": number;
+    "deleteCount": number;
+    "updateCount": number;
+    "insertCount": number;
+    "conflictRowKey"?: string;
+    "error"?: AppError | null;
+    "credentialSaved"?: boolean;
+    "saveWarning"?: string;
 }
 
 /**
@@ -104,6 +129,25 @@ export interface Capabilities {
 }
 
 /**
+ * CellInputMode represents mutually exclusive user input modes for a written cell,
+ * eliminating ambiguous combinations such as IsNull && IsDefault.
+ */
+export enum CellInputMode {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    CellInputLiteral = "literal",
+    CellInputNull = "null",
+
+    /**
+     * Allowed in INSERT to omit column / use DB default
+     */
+    CellInputDefault = "default",
+};
+
+/**
  * CellValue preserves exact string representation for precision-sensitive types and
  * strictly distinguishes NULL (Kind == KindNull) from empty string (Kind == KindString, Text == "").
  */
@@ -113,6 +157,28 @@ export interface CellValue {
     "truncated"?: boolean;
     "byteLength"?: number;
     "streamRef"?: string;
+
+    /**
+     * SQLite typeof: null|integer|real|text|blob
+     */
+    "storageClass"?: string;
+}
+
+/**
+ * ChangeStepPreview displays one parameterized statement in the exact execution order
+ * (Deletes -> Updates -> Inserts) rendered from the immutable ChangePlan.
+ */
+export interface ChangeStepPreview {
+    "index": number;
+
+    /**
+     * delete | update | insert
+     */
+    "op": string;
+    "rowKey": string;
+    "sql": string;
+    "previewSql": string;
+    "params"?: string[] | null;
 }
 
 /**
@@ -122,11 +188,25 @@ export interface ColumnDetail {
     "name": string;
     "dataType": string;
     "columnType": string;
+    "collation"?: string;
     "nullable": boolean;
     "isPrimaryKey": boolean;
     "defaultValue"?: string;
     "hasDefault": boolean;
     "autoIncrement": boolean;
+
+    /**
+     * "" | "virtual" | "stored"
+     */
+    "generatedKind"?: string;
+
+    /**
+     * "" | "always" | "by_default"
+     */
+    "identityKind"?: string;
+    "insertable": boolean;
+    "updatable": boolean;
+    "readOnlyReason"?: string;
     "comment"?: string;
     "ordinalPos": number;
 }
@@ -260,6 +340,9 @@ export enum ErrorCode {
     ErrConcurrencyConflict = "ERR_CONCURRENCY_CONFLICT",
     ErrRowNotIdentifiable = "ERR_ROW_NOT_IDENTIFIABLE",
     ErrBatchNonTx = "ERR_BATCH_NON_TRANSACTIONAL",
+    ErrSchemaChanged = "ERR_SCHEMA_CHANGED",
+    ErrPlanInvalidated = "ERR_PLAN_INVALIDATED",
+    ErrPrecisionUnsupported = "ERR_PRECISION_UNSUPPORTED",
     ErrInvalidArgument = "ERR_INVALID_ARGUMENT",
     ErrNotFound = "ERR_NOT_FOUND",
     ErrUnsupported = "ERR_UNSUPPORTED",
@@ -351,6 +434,49 @@ export interface FetchResultPageResponse {
 }
 
 /**
+ * GridApplyOutcome reports the definitive backend outcome of applying a grid change plan.
+ */
+export enum GridApplyOutcome {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    GridApplyCommitted = "committed",
+    GridApplyNotCommitted = "not_committed",
+    GridApplyUnknown = "unknown",
+};
+
+/**
+ * GridRowDelete requests deleting one existing row identified by its full original stable key.
+ */
+export interface GridRowDelete {
+    "rowKey": string;
+    "keyValues": { [_ in string]?: OriginalCellValue } | null;
+}
+
+/**
+ * GridRowInsert requests inserting one new row. Columns omitted or marked CellInputDefault
+ * are skipped so the database fills defaults / auto-increment / generated values.
+ */
+export interface GridRowInsert {
+    "rowKey": string;
+    "values": { [_ in string]?: NewCellValue } | null;
+}
+
+/**
+ * GridRowUpdate requests updating modified columns on one existing row.
+ * KeyValues holds the original stable key values; OriginalValues holds read-time facts for
+ * modified columns; NewValues holds the user-supplied target values.
+ */
+export interface GridRowUpdate {
+    "rowKey": string;
+    "keyValues": { [_ in string]?: OriginalCellValue } | null;
+    "originalValues": { [_ in string]?: OriginalCellValue } | null;
+    "newValues": { [_ in string]?: NewCellValue } | null;
+}
+
+/**
  * HighRiskStatement describes one backend-identified high-risk statement requiring explicit user confirmation.
  */
 export interface HighRiskStatement {
@@ -371,6 +497,14 @@ export interface IndexDetail {
 }
 
 /**
+ * NewCellValue carries one user-supplied target cell value.
+ */
+export interface NewCellValue {
+    "mode": CellInputMode;
+    "text"?: string;
+}
+
+/**
  * ObjectSummary represents a view, sequence, or routine entry in the explorer tree.
  */
 export interface ObjectSummary {
@@ -383,6 +517,48 @@ export interface ObjectSummary {
      */
     "kind": string;
     "comment"?: string;
+}
+
+/**
+ * OriginalCellValue carries the exact read-time database fact returned by BrowseTable,
+ * used strictly for stable-key targeting and modified-column concurrency verification.
+ */
+export interface OriginalCellValue {
+    "kind": ValueKind;
+    "text"?: string;
+    "truncated"?: boolean;
+
+    /**
+     * SQLite typeof: null|integer|real|text|blob
+     */
+    "storageClass"?: string;
+}
+
+/**
+ * PreviewGridChangesRequest requests building and storing an immutable parameterized ChangePlan.
+ */
+export interface PreviewGridChangesRequest {
+    "connectionId": string;
+    "database": string;
+    "schema"?: string;
+    "table": string;
+    "deletes"?: GridRowDelete[] | null;
+    "updates"?: GridRowUpdate[] | null;
+    "inserts"?: GridRowInsert[] | null;
+}
+
+/**
+ * PreviewGridChangesResponse returns the server-issued one-time planID and exact preview SQL.
+ */
+export interface PreviewGridChangesResponse {
+    "planId": string;
+    "steps": ChangeStepPreview[] | null;
+    "deleteCount": number;
+    "updateCount": number;
+    "insertCount": number;
+    "isProduction": boolean;
+    "credentialSaved"?: boolean;
+    "saveWarning"?: string;
 }
 
 /**

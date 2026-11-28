@@ -21,6 +21,7 @@ type runtimeSSHSecretKey struct{}
 type runtimeSSHSecret struct {
 	secret          string
 	saveSecret      bool
+	expectedCfgVer  uint64
 	handledSave     atomic.Bool
 	credentialSaved atomic.Bool
 	saveWarningMu   sync.Mutex
@@ -78,10 +79,13 @@ func (s *ConnectionService) resolveSSHTunnel(
 	carrier := runtimeSSHSecretFromContext(ctx)
 
 	// 1. Pre-auth save entry: runs BEFORE TryAcquireExisting and BEFORE SSH auth so checked
-	// submissions always persist (even when reusing a live tunnel or if auth subsequently fails).
+	// submissions always persist (even when reusing a live tunnel or if auth subsequently fails),
+	// while skipping persistence if carrier is pinned to an older ConfigVersion.
 	if carrier != nil && carrier.saveSecret && carrier.secret != "" && (authMethod == "password" || authMethod == "key") {
 		if carrier.handledSave.CompareAndSwap(false, true) {
-			s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+			if carrier.expectedCfgVer == 0 || carrier.expectedCfgVer == cfgVer {
+				s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+			}
 		}
 	}
 
@@ -220,6 +224,10 @@ func (s *ConnectionService) PrepareRuntimeSSHCredential(ctx context.Context, con
 	if ent == nil {
 		return
 	}
+	if carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+		// Connection configuration changed since the plan was created; never write secret to an edited host.
+		return
+	}
 	var params dto.ConnectionParams
 	if err := json.Unmarshal([]byte(ent.ConfigJSON), &params); err != nil {
 		carrier.setSaveWarning("保存 SSH 凭据前解析连接配置失败: " + err.Error())
@@ -232,7 +240,11 @@ func (s *ConnectionService) PrepareRuntimeSSHCredential(ctx context.Context, con
 	if authMethod != "password" && authMethod != "key" {
 		return
 	}
-	s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+	expectedVer := cfgVer
+	if carrier.expectedCfgVer > 0 {
+		expectedVer = carrier.expectedCfgVer
+	}
+	s.saveRuntimeSSHCredential(ctx, connID, expectedVer, authMethod, carrier.secret, carrier)
 }
 
 // TrustSSHHostKey atomically persists a user-confirmed SSH host key fingerprint.
@@ -341,7 +353,7 @@ func mapTunnelError(err error, connID string, cfg tunnel.SSHConfig) *dto.AppErro
 	if errors.As(err, &ae) {
 		return ae
 	}
-	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error())
+	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error()).WithCause(err)
 }
 
 func attachSaveOutcomeToError(appErr *dto.AppError, carrier *runtimeSSHSecret) {

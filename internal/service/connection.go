@@ -113,6 +113,12 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 		password = pw
 	}
 
+	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+		// Connection config changed since the plan/challenge was created: reject BEFORE resolveSSHTunnel
+		// so the runtime SSH password is never used to authenticate against an edited host (even when saveSecret=false).
+		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
+	}
+
 	var dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 	var tunnelGen uint64
 
@@ -133,20 +139,21 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 		db = overrideDB
 	}
 	return driver.ResolvedConfig{
-		ConnectionID: ent.ID,
-		Engine:       dto.EngineType(ent.Driver),
-		Host:         params.Host,
-		Port:         params.Port,
-		Username:     params.Username,
-		Password:     password,
-		Database:     db,
-		FilePath:     params.FilePath,
-		ReadOnly:     ent.ReadOnly,
-		TLS:          params.TLS,
-		TimeoutSec:   params.ConnectTimeoutS,
-		ErrorCharset: params.ErrorCharset,
-		DialContext:  dialCtx,
-		TunnelGen:    tunnelGen,
+		ConnectionID:  ent.ID,
+		Engine:        dto.EngineType(ent.Driver),
+		Host:          params.Host,
+		Port:          params.Port,
+		Username:      params.Username,
+		Password:      password,
+		Database:      db,
+		FilePath:      params.FilePath,
+		ReadOnly:      ent.ReadOnly,
+		TLS:           params.TLS,
+		TimeoutSec:    params.ConnectTimeoutS,
+		ErrorCharset:  params.ErrorCharset,
+		DialContext:   dialCtx,
+		TunnelGen:     tunnelGen,
+		ConfigVersion: cfgVer,
 	}, nil
 }
 
@@ -632,7 +639,7 @@ func asAppError(err error, fallbackCode dto.ErrorCode, fallbackMsg string) *dto.
 	if mapped := tunnelChallengeOrAuthAppError(err, ""); mapped != nil {
 		return mapped
 	}
-	return dto.NewAppError(fallbackCode, fmt.Sprintf("%s: %s", fallbackMsg, err.Error()), err.Error())
+	return dto.NewAppError(fallbackCode, fmt.Sprintf("%s: %s", fallbackMsg, err.Error()), err.Error()).WithCause(err)
 }
 
 func normalizeAndValidateErrorCharset(engine dto.EngineType, raw string) (string, *dto.AppError) {
