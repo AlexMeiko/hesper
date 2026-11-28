@@ -369,22 +369,19 @@ END`, schemaName, schemaName)
 			procBtName := "cs_proc_bt_" + suffix
 			eventName := "cs_ev_" + suffix
 			t.Cleanup(func() {
-				cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP EVENT IF EXISTS `%s`", eventName)); derr != nil {
-					t.Errorf("cleanup DROP EVENT %s failed: %v", eventName, derr)
-				}
-				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procBtName)); derr != nil {
-					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procBtName, derr)
-				}
-				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procExecName)); derr != nil {
-					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procExecName, derr)
-				}
-				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procName)); derr != nil {
-					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procName, derr)
-				}
-				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl)); derr != nil {
-					t.Errorf("cleanup DROP TABLE %s failed: %v", tbl, derr)
+				for _, q := range []string{
+					fmt.Sprintf("DROP EVENT IF EXISTS `%s`", eventName),
+					fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procBtName),
+					fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procExecName),
+					fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procName),
+					fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl),
+				} {
+					cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					_, derr := adminDB.ExecContext(cctx, q)
+					cancel()
+					if derr != nil {
+						t.Errorf("cleanup %s failed: %v", q, derr)
+					}
 				}
 			})
 			connSvc, querySvc, _ := newQueryCompoundTestStack(t)

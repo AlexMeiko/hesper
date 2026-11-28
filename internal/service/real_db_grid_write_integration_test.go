@@ -117,6 +117,8 @@ type commitDropProxy struct {
 	wg                  sync.WaitGroup
 	stallTimedOut       atomic.Bool
 	rollbackIntercepted atomic.Bool
+	requireRealReply    atomic.Bool
+	missingBackendReply atomic.Bool
 }
 
 func startCommitDropProxy(t *testing.T, backendAddr string, engine dto.EngineType) *commitDropProxy {
@@ -159,6 +161,7 @@ func (p *commitDropProxy) ArmNextCommit() {
 }
 
 func (p *commitDropProxy) ArmNextCommitWith(fn func()) {
+	p.missingBackendReply.Store(false)
 	p.mu.Lock()
 	p.action = proxyActionDropCommit
 	p.onTrigger = fn
@@ -194,6 +197,14 @@ func (p *commitDropProxy) StallTimedOut() bool {
 
 func (p *commitDropProxy) RollbackIntercepted() bool {
 	return p.rollbackIntercepted.Load()
+}
+
+func (p *commitDropProxy) SetRequireRealReply(v bool) {
+	p.requireRealReply.Store(v)
+}
+
+func (p *commitDropProxy) MissingBackendReply() bool {
+	return p.missingBackendReply.Load()
 }
 
 func (p *commitDropProxy) consumeActionForFrame(frame []byte) (proxyAction, func()) {
@@ -460,17 +471,28 @@ func (p *commitDropProxy) handleConn(clientConn net.Conn) {
 
 	// Server -> Client
 	defer close(serverDone)
+	handleMissingReply := func() {
+		if p.requireRealReply.Load() {
+			p.missingBackendReply.Store(true)
+			return
+		}
+		_, _ = clientConn.Write([]byte{0x01})
+	}
 	buf := make([]byte, 16*1024)
 	for {
 		select {
 		case <-dropCh:
-			// Read 1 byte from server (or synthesize 1 partial header byte) and immediately close socket!
-			_ = serverConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			// Read 1 byte from server (or synthesize 1 partial header byte when allowed) and immediately close socket!
+			wait := 200 * time.Millisecond
+			if p.requireRealReply.Load() {
+				wait = 2 * time.Second
+			}
+			_ = serverConn.SetReadDeadline(time.Now().Add(wait))
 			one := make([]byte, 1)
 			if n, _ := serverConn.Read(one); n == 1 {
 				_, _ = clientConn.Write(one)
 			} else {
-				_, _ = clientConn.Write([]byte{0x01})
+				handleMissingReply()
 			}
 			closeBoth()
 			return
@@ -500,7 +522,7 @@ func (p *commitDropProxy) handleConn(clientConn net.Conn) {
 				continue
 			}
 			if dropping.Load() {
-				_, _ = clientConn.Write([]byte{0x01})
+				handleMissingReply()
 			}
 			closeBoth()
 			return
@@ -2153,6 +2175,7 @@ func TestCommitDropProxySplitReadFraming(t *testing.T) {
 	}()
 
 	px := startCommitDropProxy(t, backendLn.Addr().String(), dto.EngineMySQL)
+	px.SetRequireRealReply(true)
 	px.ArmNextCommit()
 
 	cli, err := net.DialTimeout("tcp", net.JoinHostPort(px.host, strconv.Itoa(px.port)), 2*time.Second)
@@ -2185,6 +2208,9 @@ func TestCommitDropProxySplitReadFraming(t *testing.T) {
 	var ne net.Error
 	if errors.As(lastErr, &ne) && ne.Timeout() {
 		t.Fatalf("expected immediate disconnect after 1 partial byte, got read timeout: %v", lastErr)
+	}
+	if px.MissingBackendReply() {
+		t.Fatalf("proxy timed out waiting for real backend reply before dropping connection")
 	}
 	if totalRead != 1 || reply[0] != 0x07 {
 		t.Fatalf("expected exactly 1 partial response byte (0x07) before drop, got %d bytes (%x) err=%v", totalRead, reply[:totalRead], lastErr)
