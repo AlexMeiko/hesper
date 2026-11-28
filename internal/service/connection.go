@@ -144,9 +144,10 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 		ReadOnly:     ent.ReadOnly,
 		TLS:          params.TLS,
 		TimeoutSec:   params.ConnectTimeoutS,
-		ErrorCharset: params.ErrorCharset,
-		DialContext:  dialCtx,
-		TunnelGen:    tunnelGen,
+		ErrorCharset:  params.ErrorCharset,
+		DialContext:   dialCtx,
+		TunnelGen:     tunnelGen,
+		ConfigVersion: cfgVer,
 	}, nil
 }
 
@@ -632,7 +633,7 @@ func asAppError(err error, fallbackCode dto.ErrorCode, fallbackMsg string) *dto.
 	if mapped := tunnelChallengeOrAuthAppError(err, ""); mapped != nil {
 		return mapped
 	}
-	return dto.NewAppError(fallbackCode, fmt.Sprintf("%s: %s", fallbackMsg, err.Error()), err.Error())
+	return dto.NewAppError(fallbackCode, fmt.Sprintf("%s: %s", fallbackMsg, err.Error()), err.Error()).WithCause(err)
 }
 
 func normalizeAndValidateErrorCharset(engine dto.EngineType, raw string) (string, *dto.AppError) {

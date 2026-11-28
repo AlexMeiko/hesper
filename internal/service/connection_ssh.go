@@ -341,7 +341,7 @@ func mapTunnelError(err error, connID string, cfg tunnel.SSHConfig) *dto.AppErro
 	if errors.As(err, &ae) {
 		return ae
 	}
-	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error())
+	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error()).WithCause(err)
 }
 
 func attachSaveOutcomeToError(appErr *dto.AppError, carrier *runtimeSSHSecret) {
