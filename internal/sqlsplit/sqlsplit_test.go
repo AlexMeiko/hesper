@@ -1173,6 +1173,52 @@ SELECT 5;`
 			}
 		}
 	})
+
+	t.Run("PostgreSQL UTF-8 dollar tags stay intact inside BEGIN ATOMIC and tokenizer", func(t *testing.T) {
+		src := "CREATE FUNCTION f_utf8_tag() RETURNS TEXT LANGUAGE SQL\n" +
+			"BEGIN ATOMIC\n" +
+			"  SELECT $é$one; END; DROP TABLE users; two$é$;\n" +
+			"  SELECT $标签_1$three; END; four$标签_1$;\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END;\n" +
+			"SELECT foo$é$ FROM bar;\n" +
+			"SELECT $1 + $2;"
+		stmts := Split(src, DialectPostgres)
+		if len(stmts) != 3 {
+			t.Fatalf("PG UTF-8 dollar tags got %d statements, want 3: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmts[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT foo$é$ FROM bar" || stmts[2].Text != "SELECT $1 + $2" {
+			t.Fatalf("trailing statements unexpected: %+v", stmts[1:])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor on UPDATE after UTF-8 dollar tag selected %q", picked.Text)
+		}
+		// Tokenizer must not leak keywords (DROP / END) from inside UTF-8 dollar-quoted or multiline E'...' literals.
+		for _, tok := range tokenizeSQL(stmts[0].Text, DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "DROP" {
+				t.Fatalf("tokenizer leaked DROP from inside UTF-8 dollar-quoted literal: %+v", tok)
+			}
+		}
+		for _, tok := range tokenizeSQL("SELECT E'a'\n'b\\' ; DROP TABLE users'", DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "DROP" {
+				t.Fatalf("tokenizer leaked DROP from inside continued E'...' literal: %+v", tok)
+			}
+		}
+		// Identifier containing '$' (foo$é$) must remain a single identifier token, not open a dollar quote.
+		var sawFooTag bool
+		for _, tok := range tokenizeSQL(stmts[1].Text, DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "FOO$É$" {
+				sawFooTag = true
+			}
+		}
+		if !sawFooTag {
+			t.Fatalf("expected identifier foo$é$ to remain intact in tokenizeSQL, got %+v", tokenizeSQL(stmts[1].Text, DialectPostgres))
+		}
+	})
 }
 
 func indexOfMust(t *testing.T, src, needle string) int {

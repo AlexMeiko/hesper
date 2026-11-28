@@ -1220,18 +1220,36 @@ func parseDollarTag(s string) (string, bool) {
 	if s[1] == '$' {
 		return "$$", true
 	}
-	if !isIdentStart(rune(s[1])) {
+	r, size := utf8.DecodeRuneInString(s[1:])
+	if !isPGDollarTagStart(r, size) {
 		return "", false
 	}
-	for i := 2; i < len(s); i++ {
+	for i := 1 + size; i < len(s); {
 		if s[i] == '$' {
 			return s[:i+1], true
 		}
-		if !isIdentPart(rune(s[i])) {
+		nr, nsize := utf8.DecodeRuneInString(s[i:])
+		if !isPGDollarTagPart(nr, nsize) {
 			return "", false
 		}
+		i += nsize
 	}
 	return "", false
+}
+
+// PostgreSQL scan.l: dolq_start = [A-Za-z\200-\377_], dolq_cont = [A-Za-z\200-\377_0-9].
+func isPGDollarTagStart(r rune, size int) bool {
+	if r == utf8.RuneError && size == 1 {
+		return false
+	}
+	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r >= 0x80
+}
+
+func isPGDollarTagPart(r rune, size int) bool {
+	if r == utf8.RuneError && size == 1 {
+		return false
+	}
+	return isPGDollarTagStart(r, size) || (r >= '0' && r <= '9')
 }
 
 func isIdentStart(r rune) bool { return r == '_' || unicode.IsLetter(r) }
