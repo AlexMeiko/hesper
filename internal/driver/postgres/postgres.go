@@ -442,50 +442,27 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, schema, table string) (*d
 	if schema == "" {
 		schema = "public"
 	}
-	detail := &dto.TableDetail{Database: db, Schema: schema, Name: table, Engine: "heap"}
-
-	pkCols, err := c.loadPrimaryKeyColumns(ctx, schema, table)
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
+		Database: db,
+		Schema:   schema,
+		Table:    table,
+	}, c.readOnly)
 	if err != nil {
 		return nil, err
 	}
-	pkSet := map[string]bool{}
-	for _, k := range pkCols {
-		pkSet[k] = true
-	}
 
-	rows, err := c.conn.Query(ctx, `
-		SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
-		       COALESCE(pg_get_expr(ad.adbin, ad.adrelid), ''), ad.adbin IS NOT NULL,
-		       COALESCE(col_description(c.oid, a.attnum), ''), a.attnum
-		FROM pg_attribute a
-		JOIN pg_class c ON c.oid = a.attrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-		WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
-		ORDER BY a.attnum`, pgx.QueryExecModeExec, schema, table)
-	if err != nil {
-		return nil, c.classifyError(err)
+	cols := make([]dto.ColumnDetail, len(ws.Columns))
+	for i, wc := range ws.Columns {
+		cols[i] = wc.Detail
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var col dto.ColumnDetail
-		if err := rows.Scan(&col.Name, &col.ColumnType, &col.Nullable, &col.DefaultValue, &col.HasDefault, &col.Comment, &col.OrdinalPos); err != nil {
-			return nil, err
-		}
-		col.DataType = col.ColumnType
-		col.IsPrimaryKey = pkSet[col.Name]
-		detail.Columns = append(detail.Columns, col)
-	}
-	if err := c.rowsError(rows); err != nil {
-		return nil, err
-	}
-
-	edit, err := c.InspectTableEditability(ctx, db, schema, table, c.readOnly)
-	if err == nil {
-		detail.Editability = edit
-	}
-	return detail, nil
+	return &dto.TableDetail{
+		Database:    ws.Database,
+		Schema:      ws.Schema,
+		Name:        ws.Table,
+		Engine:      ws.StorageEngine,
+		Columns:     cols,
+		Editability: ws.Editability,
+	}, nil
 }
 
 func (c *Conn) GetTableDDL(ctx context.Context, db, schema, table string) (string, error) {
@@ -514,30 +491,16 @@ func (c *Conn) GetTableDDL(ctx context.Context, db, schema, table string) (strin
 	return fmt.Sprintf("CREATE TABLE %s.%s (\n%s\n);", QuoteIdent(detail.Schema), QuoteIdent(detail.Name), strings.Join(lines, ",\n")), nil
 }
 
-func (c *Conn) InspectTableEditability(ctx context.Context, _, schema, table string, clientReadOnly bool) (dto.TableEditability, error) {
-	if schema == "" {
-		schema = "public"
-	}
-	edit := dto.TableEditability{
-		CanWrite:           !clientReadOnly,
-		RowIdentity:        dto.RowIdentityNone,
-		BatchTransactional: true,
-		StorageEngine:      "heap",
-	}
-	if clientReadOnly {
-		edit.Reasons = append(edit.Reasons, "read_only_connection")
-	}
-	pkCols, err := c.loadPrimaryKeyColumns(ctx, schema, table)
+func (c *Conn) InspectTableEditability(ctx context.Context, db, schema, table string, clientReadOnly bool) (dto.TableEditability, error) {
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
+		Database: db,
+		Schema:   schema,
+		Table:    table,
+	}, clientReadOnly)
 	if err != nil {
-		return edit, err
+		return dto.TableEditability{}, err
 	}
-	if len(pkCols) > 0 {
-		edit.RowIdentity = dto.RowIdentityPrimaryKey
-		edit.KeyColumns = pkCols
-	} else {
-		edit.Reasons = append(edit.Reasons, "no_stable_unique_key")
-	}
-	return edit, nil
+	return ws.Editability, nil
 }
 
 func (c *Conn) FetchCompletionCatalog(ctx context.Context, db, schema string) (*dto.CompletionCatalog, error) {
@@ -686,29 +649,7 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 }
 
 func (c *Conn) loadPrimaryKeyColumns(ctx context.Context, schema, table string) ([]string, error) {
-	rows, err := c.conn.Query(ctx, `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_class c ON c.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
-		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-		WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
-		ORDER BY k.ord`, pgx.QueryExecModeExec, schema, table)
-	if err != nil {
-		return nil, c.classifyError(err)
-	}
-	defer rows.Close()
-
-	var cols []string
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return nil, err
-		}
-		cols = append(cols, col)
-	}
-	return cols, c.rowsError(rows)
+	return c.loadPrimaryKeyColumnsWith(ctx, c.conn, schema, table)
 }
 
 // --- RowStream & PG OID Decoding ---
@@ -803,7 +744,9 @@ func pgOIDTypeInfo(oid uint32) (string, dto.ValueKind) {
 		return "NUMERIC", dto.KindDecimal
 	case pgtype.Float4OID, pgtype.Float8OID:
 		return "DOUBLE", dto.KindFloat
-	case pgtype.JSONOID, pgtype.JSONBOID:
+	case pgtype.JSONOID:
+		return "JSON", dto.KindJSON
+	case pgtype.JSONBOID:
 		return "JSONB", dto.KindJSON
 	case pgtype.ByteaOID:
 		return "BYTEA", dto.KindBinary
@@ -925,15 +868,15 @@ func classifyPGError(err error, reportedCharset, fallbackCharset string) *dto.Ap
 	}
 	lower := strings.ToLower(err.Error())
 	if strings.Contains(lower, "eof") || strings.Contains(lower, "closed") || strings.Contains(lower, "reset by peer") || strings.Contains(lower, "broken pipe") {
-		return &dto.AppError{
+		return (&dto.AppError{
 			Code:    dto.ErrSessionLost,
 			Message: "PostgreSQL 连接已断开，原会话已结束",
 			Detail:  err.Error(),
-		}
+		}).WithCause(err)
 	}
-	return &dto.AppError{
+	return (&dto.AppError{
 		Code:    dto.ErrConnectionFailed,
 		Message: "PostgreSQL 操作失败",
 		Detail:  err.Error(),
-	}
+	}).WithCause(err)
 }
