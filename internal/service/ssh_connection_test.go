@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +18,9 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"hesper/internal/changeset"
 	"hesper/internal/driver"
+	"hesper/internal/driver/fake"
 	"hesper/internal/dto"
 	"hesper/internal/entity"
 	"hesper/internal/repository"
@@ -92,11 +95,11 @@ func (d *fakeTunnelDBDriver) Open(_ context.Context, cfg driver.ResolvedConfig) 
 
 type fakeTunnelDBConn struct{ gen uint64 }
 
-func (c *fakeTunnelDBConn) Ping(_ context.Context) error  { return nil }
-func (c *fakeTunnelDBConn) Close() error                  { return nil }
-func (c *fakeTunnelDBConn) Dialect() dto.EngineType       { return dto.EngineMySQL }
+func (c *fakeTunnelDBConn) Ping(_ context.Context) error   { return nil }
+func (c *fakeTunnelDBConn) Close() error                   { return nil }
+func (c *fakeTunnelDBConn) Dialect() dto.EngineType        { return dto.EngineMySQL }
 func (c *fakeTunnelDBConn) WriteSentWithoutResponse() bool { return false }
-func (c *fakeTunnelDBConn) ResetWireTracker()             {}
+func (c *fakeTunnelDBConn) ResetWireTracker()              {}
 func (c *fakeTunnelDBConn) ServerFact(_ context.Context) (driver.ServerFact, error) {
 	return driver.ServerFact{DetectedType: dto.EngineMySQL, ServerVersion: "8.4.0", CurrentDB: "app"}, nil
 }
@@ -106,12 +109,14 @@ func (c *fakeTunnelDBConn) ClassifyError(err error, _ bool) *dto.AppError {
 }
 
 type miniSSHServer struct {
-	host        string
-	port        int
-	addr        string
-	algorithm   string
-	fingerprint string
-	ln          net.Listener
+	host         string
+	port         int
+	addr         string
+	algorithm    string
+	fingerprint  string
+	ln           net.Listener
+	connCount    atomic.Int32
+	authAttempts atomic.Int32
 }
 
 func startMiniSSHServer(t *testing.T, validPassword string) *miniSSHServer {
@@ -124,8 +129,26 @@ func startMiniSSHServer(t *testing.T, validPassword string) *miniSSHServer {
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen ssh: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	h, pStr, _ := net.SplitHostPort(ln.Addr().String())
+	p, _ := strconv.Atoi(pStr)
+	srv := &miniSSHServer{
+		host:        h,
+		port:        p,
+		addr:        ln.Addr().String(),
+		algorithm:   signer.PublicKey().Type(),
+		fingerprint: ssh.FingerprintSHA256(signer.PublicKey()),
+		ln:          ln,
+	}
+
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(_ ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) {
+			srv.authAttempts.Add(1)
 			if string(pass) == validPassword {
 				return &ssh.Permissions{}, nil
 			}
@@ -134,18 +157,13 @@ func startMiniSSHServer(t *testing.T, validPassword string) *miniSSHServer {
 	}
 	cfg.AddHostKey(signer)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen ssh: %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
 	go func() {
 		for {
 			raw, aerr := ln.Accept()
 			if aerr != nil {
 				return
 			}
+			srv.connCount.Add(1)
 			go func(c net.Conn) {
 				defer c.Close()
 				sc, chans, reqs, serr := ssh.NewServerConn(c, cfg)
@@ -161,16 +179,7 @@ func startMiniSSHServer(t *testing.T, validPassword string) *miniSSHServer {
 		}
 	}()
 
-	h, pStr, _ := net.SplitHostPort(ln.Addr().String())
-	p, _ := strconv.Atoi(pStr)
-	return &miniSSHServer{
-		host:        h,
-		port:        p,
-		addr:        ln.Addr().String(),
-		algorithm:   signer.PublicKey().Type(),
-		fingerprint: ssh.FingerprintSHA256(signer.PublicKey()),
-		ln:          ln,
-	}
+	return srv
 }
 
 func newTestSSHStack(t *testing.T, withTunnel bool) (*ConnectionService, *QueryService, *memSecretStore, *tunnel.Manager, *fakeTunnelDBDriver) {
@@ -795,4 +804,259 @@ func TestSaveConnectionPartialKeyringMutationRollsBackDBAndSSHCredentials(t *tes
 	}
 	assertSecret(t, secrets, sshPasswordRef(saved.ID), "orig-ssh-pw", "restore orig-ssh-pw in combined edit rollback")
 	assertSecret(t, secrets, dbPasswordRef(saved.ID), "orig-db-pw", "restore orig-db-pw in combined edit rollback")
+}
+
+func TestApplyGridChangesWithSSHSecretSkipsSaveWhenHostEditedAfterPreview(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+	repo, err := repository.OpenLocalDB(dbPath)
+	if err != nil {
+		t.Fatalf("open local db: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	secrets := newMemSecretStore()
+	reg := driver.NewRegistry()
+	reg.Register(fake.NewOpener(fake.FaultBehavior{}))
+
+	connSvc := NewConnectionService(repo, secrets, nil, nil)
+	sessMgr := session.NewManager(reg, connSvc.ResolveConfig)
+	connSvc.SetSessionManager(sessMgr)
+	tunnelMgr := tunnel.NewManager(repo, sessMgr.MarkConnectionLost)
+	t.Cleanup(func() { tunnelMgr.CloseAll() })
+	connSvc.SetTunnelManager(tunnelMgr)
+
+	changeSvc := NewChangeService(sessMgr, repo, changeset.NewPlanStore(changeset.PlanStoreOptions{}))
+	changeSvc.SetSSHSecretPreparer(connSvc.PrepareRuntimeSSHCredential)
+
+	sshSrv1 := startMiniSSHServer(t, "secret-for-host-1")
+	sshSrv2 := startMiniSSHServer(t, "secret-for-host-2")
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv1.host, sshSrv1.port), sshSrv1.algorithm, sshSrv1.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv1: %v", err)
+	}
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv2.host, sshSrv2.port), sshSrv2.algorithm, sshSrv2.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv2: %v", err)
+	}
+
+	makeFakeSSHReq := func(id, sshHost string, sshPort int) dto.SaveConnectionRequest {
+		return dto.SaveConnectionRequest{
+			ID:       id,
+			Name:     "SSH Grid Conn",
+			Driver:   dto.EngineFake,
+			EnvColor: "green",
+			Params: dto.ConnectionParams{
+				Host:            "127.0.0.1",
+				Port:            3306,
+				DefaultDatabase: "demo",
+				SSH: &dto.SSHConfig{
+					Enabled:        true,
+					Host:           sshHost,
+					Port:           sshPort,
+					Username:       "ops",
+					AuthMethod:     "password",
+					SaveCredential: false,
+				},
+			},
+		}
+	}
+
+	saved, err := connSvc.SaveConnection(ctx, makeFakeSSHReq("", sshSrv1.host, sshSrv1.port))
+	if err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+
+	// 1. Preview two plans over sshSrv1 (ConfigVersion=1) with one-time SSH secret (saveSecret=false).
+	prevNoSave, err := changeSvc.PreviewGridChangesWithSSHSecret(ctx, dto.PreviewGridChangesRequest{
+		ConnectionID: saved.ID, Database: "demo", Table: "users",
+		Inserts: []dto.GridRowInsert{{RowKey: "ins-1a", Values: map[string]dto.NewCellValue{"name": {Mode: dto.CellInputLiteral, Text: "Alice"}}}},
+	}, "secret-for-host-1", false)
+	if err != nil {
+		t.Fatalf("PreviewGridChangesWithSSHSecret (no-save plan): %v", err)
+	}
+	prevWithSave, err := changeSvc.PreviewGridChangesWithSSHSecret(ctx, dto.PreviewGridChangesRequest{
+		ConnectionID: saved.ID, Database: "demo", Table: "users",
+		Inserts: []dto.GridRowInsert{{RowKey: "ins-1b", Values: map[string]dto.NewCellValue{"name": {Mode: dto.CellInputLiteral, Text: "Alice2"}}}},
+	}, "secret-for-host-1", false)
+	if err != nil {
+		t.Fatalf("PreviewGridChangesWithSSHSecret (save plan): %v", err)
+	}
+	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "saveSecret=false must not persist secret")
+
+	// 2. Edit connection's SSH host to sshSrv2 (bumps ConfigVersion -> 2) BEFORE Apply retry!
+	if _, err := connSvc.SaveConnection(ctx, makeFakeSSHReq(saved.ID, sshSrv2.host, sshSrv2.port)); err != nil {
+		t.Fatalf("SaveConnection edit host: %v", err)
+	}
+
+	// 3a. Apply retry with saveSecret=false using stale planID MUST reject BEFORE dialing sshSrv2!
+	respNoSave, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       prevNoSave.PlanID,
+	}, "secret-for-host-1", false)
+	if err != nil {
+		t.Fatalf("expected structured NotCommitted + ErrPlanInvalidated (saveSecret=false), got err=%v", err)
+	}
+	if respNoSave.Outcome != dto.GridApplyNotCommitted || respNoSave.Error == nil || respNoSave.Error.Code != dto.ErrPlanInvalidated {
+		t.Fatalf("expected NotCommitted + ErrPlanInvalidated (saveSecret=false), got %+v", respNoSave)
+	}
+	if sshSrv2.connCount.Load() != 0 || sshSrv2.authAttempts.Load() != 0 {
+		t.Fatalf("stale plan retry (saveSecret=false) MUST NOT dial or send SSH password to edited host sshSrv2, got connCount=%d authAttempts=%d",
+			sshSrv2.connCount.Load(), sshSrv2.authAttempts.Load())
+	}
+
+	// 3b. Apply retry with saveSecret=true using stale planID MUST ALSO reject BEFORE dialing sshSrv2 AND MUST NOT save secret!
+	resp, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       prevWithSave.PlanID,
+	}, "secret-for-host-1", true)
+	if err != nil {
+		t.Fatalf("expected structured NotCommitted + ErrPlanInvalidated (saveSecret=true), got err=%v", err)
+	}
+	if resp.Outcome != dto.GridApplyNotCommitted || resp.Error == nil || resp.Error.Code != dto.ErrPlanInvalidated {
+		t.Fatalf("expected NotCommitted + ErrPlanInvalidated (saveSecret=true), got %+v", resp)
+	}
+	if resp.CredentialSaved || resp.Error.CredentialSaved {
+		t.Fatalf("stale plan retry MUST NOT report CredentialSaved=true: resp=%+v err=%+v", resp, resp.Error)
+	}
+	if sshSrv2.connCount.Load() != 0 || sshSrv2.authAttempts.Load() != 0 {
+		t.Fatalf("stale plan retry (saveSecret=true) MUST NOT dial or send SSH password to edited host sshSrv2, got connCount=%d authAttempts=%d",
+			sshSrv2.connCount.Load(), sshSrv2.authAttempts.Load())
+	}
+	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "edited host MUST NOT receive stale plan SSH password")
+
+	ent, err := repo.GetConnection(ctx, saved.ID)
+	if err != nil || ent == nil {
+		t.Fatalf("GetConnection: ent=%v err=%v", ent, err)
+	}
+	var gotParams dto.ConnectionParams
+	if err := json.Unmarshal([]byte(ent.ConfigJSON), &gotParams); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if gotParams.SSH == nil || gotParams.SSH.SaveCredential {
+		t.Fatalf("expected SaveCredential to remain false on edited host, got %+v", gotParams.SSH)
+	}
+
+	// 4. Invalid / nonexistent planID with saveSecret=true MUST ALSO never write to the secret store.
+	if _, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       "nonexistent-plan-id",
+	}, "secret-for-host-2", true); err == nil {
+		t.Fatalf("expected ErrPlanInvalidated for nonexistent planID")
+	}
+	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "nonexistent planID MUST NOT persist SSH password")
+
+	// 5. Replaying an already-Finished plan with saveSecret=true MUST NOT persist SSH password.
+	prevDone, err := changeSvc.PreviewGridChangesWithSSHSecret(ctx, dto.PreviewGridChangesRequest{
+		ConnectionID: saved.ID, Database: "demo", Table: "users",
+		Inserts: []dto.GridRowInsert{{RowKey: "ins-2", Values: map[string]dto.NewCellValue{"name": {Mode: dto.CellInputLiteral, Text: "Bob"}}}},
+	}, "secret-for-host-2", false)
+	if err != nil {
+		t.Fatalf("PreviewGridChangesWithSSHSecret on sshSrv2: %v", err)
+	}
+	if sshSrv2.authAttempts.Load() == 0 {
+		t.Fatalf("expected fresh Preview on sshSrv2 to authenticate with sshSrv2")
+	}
+	doneResp, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       prevDone.PlanID,
+	}, "secret-for-host-2", false)
+	if err != nil || doneResp.Outcome != dto.GridApplyCommitted {
+		t.Fatalf("expected Committed on sshSrv2, got resp=%+v err=%v", doneResp, err)
+	}
+	replayResp, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       prevDone.PlanID,
+	}, "secret-for-host-2", true)
+	if err != nil || replayResp.Outcome != dto.GridApplyCommitted || replayResp.CredentialSaved {
+		t.Fatalf("expected cached Committed with CredentialSaved=false on replay, got resp=%+v err=%v", replayResp, err)
+	}
+	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "replayed finished plan MUST NOT persist SSH password")
+}
+
+func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
+	ctx := context.Background()
+	connSvc, _, secrets, _, _ := newTestSSHStack(t, true)
+
+	sshSrv1 := startMiniSSHServer(t, "secret-for-host-1")
+	sshSrv2 := startMiniSSHServer(t, "secret-for-host-2")
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv1.host, sshSrv1.port), sshSrv1.algorithm, sshSrv1.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv1: %v", err)
+	}
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv2.host, sshSrv2.port), sshSrv2.algorithm, sshSrv2.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv2: %v", err)
+	}
+
+	makeReq := func(id, sshHost string, sshPort int) dto.SaveConnectionRequest {
+		return dto.SaveConnectionRequest{
+			ID:       id,
+			Name:     "Direct ResolveConfig SSH Test",
+			Driver:   dto.EngineMySQL,
+			EnvColor: "green",
+			Params: dto.ConnectionParams{
+				Host:            "127.0.0.1",
+				Port:            3306,
+				Username:        "root",
+				DefaultDatabase: "demo",
+				SSH: &dto.SSHConfig{
+					Enabled:        true,
+					Host:           sshHost,
+					Port:           sshPort,
+					Username:       "ops",
+					AuthMethod:     "password",
+					SaveCredential: false,
+				},
+			},
+		}
+	}
+
+	// 1. Create connection pointing to sshSrv1 (ConfigVersion = 1) and verify initial ResolveConfig succeeds.
+	saved, err := connSvc.SaveConnection(ctx, makeReq("", sshSrv1.host, sshSrv1.port))
+	if err != nil {
+		t.Fatalf("SaveConnection: %v", err)
+	}
+	initCtx, initCarrier := withRuntimeSSHSecret(ctx, "secret-for-host-1", false)
+	initCfg, err := connSvc.ResolveConfig(initCtx, saved.ID, "demo")
+	if err != nil {
+		t.Fatalf("initial ResolveConfig against sshSrv1 failed: %v", err)
+	}
+	if initCfg.ConfigVersion == 0 {
+		t.Fatalf("expected non-zero ConfigVersion from ResolveConfig")
+	}
+	_ = initCarrier
+
+	// 2. Edit SSH host to sshSrv2 (bumps ConfigVersion to initCfg.ConfigVersion + 1).
+	if _, err := connSvc.SaveConnection(ctx, makeReq(saved.ID, sshSrv2.host, sshSrv2.port)); err != nil {
+		t.Fatalf("SaveConnection edit host to sshSrv2: %v", err)
+	}
+
+	// 3. Directly invoke ResolveConfig with a runtimeSSHSecret pinned to the stale ConfigVersion
+	//    (bypassing session.Manager.AcquireOperation's lifecycle check): BOTH saveSecret=false and
+	//    saveSecret=true MUST immediately fail with ErrPlanInvalidated BEFORE dialing sshSrv2!
+	for _, saveSecret := range []bool{false, true} {
+		staleCtx, carrier := withRuntimeSSHSecret(ctx, "secret-for-host-1", saveSecret)
+		carrier.expectedCfgVer = initCfg.ConfigVersion
+		_, rerr := connSvc.ResolveConfig(staleCtx, saved.ID, "demo")
+		var appErr *dto.AppError
+		if !errors.As(rerr, &appErr) || appErr.Code != dto.ErrPlanInvalidated {
+			t.Fatalf("saveSecret=%v: expected ErrPlanInvalidated from ResolveConfig, got %v", saveSecret, rerr)
+		}
+		if sshSrv2.connCount.Load() != 0 || sshSrv2.authAttempts.Load() != 0 {
+			t.Fatalf("saveSecret=%v: ResolveConfig MUST NOT dial or send stale password to edited host sshSrv2, got connCount=%d authAttempts=%d",
+				saveSecret, sshSrv2.connCount.Load(), sshSrv2.authAttempts.Load())
+		}
+		assertSecret(t, secrets, sshPasswordRef(saved.ID), "", fmt.Sprintf("saveSecret=%v stale ResolveConfig must not persist secret", saveSecret))
+	}
+
+	// 4. Positive control: ResolveConfig with the updated ConfigVersion succeeds and authenticates with sshSrv2.
+	freshCtx, freshCarrier := withRuntimeSSHSecret(ctx, "secret-for-host-2", false)
+	freshCarrier.expectedCfgVer = initCfg.ConfigVersion + 1
+	freshCfg, err := connSvc.ResolveConfig(freshCtx, saved.ID, "demo")
+	if err != nil {
+		t.Fatalf("ResolveConfig with current expectedCfgVer failed: %v", err)
+	}
+	if freshCfg.ConfigVersion != initCfg.ConfigVersion+1 {
+		t.Fatalf("expected ConfigVersion=%d, got %d", initCfg.ConfigVersion+1, freshCfg.ConfigVersion)
+	}
+	if sshSrv2.connCount.Load() == 0 || sshSrv2.authAttempts.Load() == 0 {
+		t.Fatalf("expected fresh ResolveConfig to dial and authenticate with sshSrv2")
+	}
 }
