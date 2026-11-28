@@ -16,11 +16,11 @@
 
 | 平台 | 产物 | 构建方式与更新策略 |
 | :--- | :--- | :--- |
-| **Windows (`amd64`)** | `sql-manager-setup-x64.exe`（NSIS）+ `portable.zip`（含 `portable.flag`） | Taskfile + NSIS；安装版支持 Wails v3 内置签名更新器 |
-| **Ubuntu 24.04+ / Debian 13+** | `sql-manager_<ver>_amd64.deb` | `nfpm` 打包并声明 GTK4 / WebKitGTK 6.0 / `libsecret-1-0` 依赖；检测到包管理器安装时仅提示升级命令 |
-| **CachyOS / Arch Linux** | `PKGBUILD`（AUR `sql-manager-bin` / `sql-manager`） | CI 自动刷新校验和；原生复用系统 GTK4/WebKitGTK 6.0，包体极小 |
-| **全 Linux 通用** | `SQL-Manager-<ver>-x86_64.AppImage` | 精简 GTK4 + WebKitGTK 6.0 单二进制 AppImage（约 8.3 MB，Type 2 FUSE3；`AppRun` 通过 `ldd -r` 预检并在缺库时弹出原生图形错误窗口） |
-| **macOS（二期）** | `sql-manager-universal.dmg` | Apple Silicon + Intel 通用二进制与公证 |
+| **Windows (`amd64`)** | `hesper-setup-x64.exe` (NSIS) + `Hesper-<ver>-windows-x86_64.zip` (含 `portable.flag`) | Taskfile + NSIS；安装版支持 Wails v3 内置签名更新器 |
+| **Ubuntu 24.04+ / Debian 13+** | `hesper_<ver>_amd64.deb` | `nfpm` 打包并声明 GTK4 / WebKitGTK 6.0 / `libsecret-1-0` 依赖；检测到包管理器安装时仅提示升级命令 |
+| **CachyOS / Arch Linux** | `PKGBUILD` (AUR `hesper-bin` / `hesper`) | CI 自动刷新校验和；原生复用系统 GTK4/WebKitGTK 6.0，包体极小 |
+| **全 Linux 通用** | `Hesper-<ver>-x86_64.AppImage` | 精简 GTK4 + WebKitGTK 6.0 单二进制 AppImage (Type 2 FUSE3；`AppRun` 通过 `ldd -r` 预检并在缺库时弹出原生图形错误窗口) |
+| **macOS (二期)** | `Hesper-universal.dmg` | Apple Silicon + Intel 通用二进制与公证 |
 
 ---
 
@@ -61,47 +61,47 @@
 
 | 验证顺序 | 数据库与版本 | 定位 | 取消与断线 | 只读与翻页 | 网格写入（含键/引擎） | 表设计器（含部分失败） | 实测备注 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | **MySQL 8.4.13 (InnoDB)** | 默认首验版本 | **已验证** | **已验证** | 待验证 | 待验证 | `mysql:8.4` 真实容器实测通过（含 `KILL QUERY`、迟到取消竞态、Execute-Once、只读账号拒写、自动提交/COMMIT 断线报结果未知） |
+| **1** | **MySQL 8.4 (InnoDB)** | 默认首验版本 | **已验证** | **已验证** | **后端 2A 已验证** (前端 2B 待实施) | 待验证 | `mysql:8.4` 真实容器实测通过 (含 `utf8mb4_0900_ai_ci` 与 `utf8mb4_bin` `PAD SPACE` 尾空格冲突、`DECIMAL(38,10)->(38,2)` 指纹防漂移、No-op 触发器、表达式索引、MyISAM 拒批、部分回包与 SSH 断隧 `Unknown`) |
 | **1** | **MySQL 8.0 / 5.7** | 主力 / 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 5.7 无原子 DDL，另需覆盖 MyISAM 非事务表完整写入验收 |
-| **2** | **PostgreSQL 16.16** | 第二个验证驱动 | **已验证** | **已验证** | 待验证 | 待验证 | `postgres:16` (`16.16-1.pgdg13+1`) 实测通过；验证切库重建连接、`SchemaSwitcher`、`CancelRequest`、`AliveFailedTx`、`INSERT ... RETURNING` Execute-Once |
+| **2** | **PostgreSQL 16** | 第二个验证驱动 | **已验证** | **已验证** | **后端 2A 已验证** (前端 2B 待实施) | 待验证 | `postgres:16` 实测通过 (含 `PK/UNIQUE INCLUDE` 裁剪、部分/表达式索引排除、`json`/`jsonb`/非确定性 ICU 排序校验、`IDENTITY ALWAYS`/`STORED`、`DEFERRABLE` 提交拒错 `NotCommitted`、SSH+mTLS 质询复用 `planID` 与中途断隧 `Unknown`) |
 | **2** | **PostgreSQL 17 / 14 / 12** | 主力 / 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 需在 CI 矩阵中补测 |
-| **3** | **MariaDB 11.4.13** | 主力验证版本 | **已验证** | **已验证** | 待验证 | 待验证 | `mariadb:11.4` (`11.4.13-MariaDB-ubu2404`) 实测通过；验证原生 `SEQUENCE` 浏览、`KILL QUERY` 与迟到取消竞态、`INSERT ... RETURNING *` Execute-Once、MyISAM/无主键判定、只读拒写与断线报结果未知 |
+| **3** | **MariaDB 11.4** | 主力验证版本 | **已验证** | **已验证** | **后端 2A 已验证** (前端 2B 待实施) | 待验证 | `mariadb:11.4` 实测通过 (含原生 `SEQUENCE`、`utf8mb4_bin` `PAD SPACE` 冲突、`DECIMAL` 精度指纹、No-op 触发器、MyISAM 拒批与部分回包 `Unknown`) |
 | **3** | **MariaDB 10.5** | 承诺下限 | 待验证 | 待验证 | 待验证 | 待验证 | 需在 CI 矩阵中补测 |
-| **4** | **SQLite（内嵌 `3.54.1`）** | 内嵌单版本 | **已验证** | **已验证** | 待验证 | 待验证 | 纯 Go `modernc.org/sqlite v1.63.0` 真实文件库实测通过：不静默建空库、`mode=ro` + `query_only=ON` 引擎级拒写、`sqlite3_interrupt` 中断保活、**3.2 `VACUUM` 隐式 `rowid` 重排 (`2→1`) 回归与显式主键判定** |
+| **4** | **SQLite (内嵌 `3.54.1`)** | 内嵌单版本 | **已验证** | **已验证** | **后端 2A 已验证** (前端 2B 待实施) | 待验证 | 纯 Go `modernc.org/sqlite v1.63.0` 真实文件库实测通过 (含 `STRICT`/`WITHOUT ROWID`/`INTEGER PRIMARY KEY` 正例、可空主键反例、`table_xinfo` 生成列、No-op 触发器、`COLLATE NOCASE`/`typeof`/`DATETIME` 原文保真、精度边界、`mode=ro` 与 `VACUUM` 回归) |
 
-> 注：非事务引擎（MyISAM）用例仅适用于 MySQL / MariaDB，对 PostgreSQL 与 SQLite 标为 `不适用`；`SEQUENCE` 浏览仅适用于 PostgreSQL 与 MariaDB，对 MySQL 与 SQLite 标为 `不适用`；**绝不把 `driver/fake` 模拟驱动通过算作真实数据库通过**。
+> 注：非事务引擎 (MyISAM) 用例仅适用于 MySQL / MariaDB，对 PostgreSQL 与 SQLite 标为 `不适用`；`SEQUENCE` 浏览仅适用于 PostgreSQL 与 MariaDB，对 MySQL 与 SQLite 标为 `不适用`；**绝不把 `driver/fake` 模拟驱动通过算作真实数据库通过**。
 
 ---
 
 ## 5. 分阶段开发路线图与门禁
 
-### Phase 0：工程骨架与基础通路（已完成 Linux 端验证；Windows 实机打包待验证）
+### Phase 0：工程骨架与基础通路 (已完成 Linux 端验证；Windows 实机打包待验证)
 - [x] 初始化 Go 1.27.4 / Wails v3.1.0 / Vue 3 + TS + Tailwind CSS 4 + CodeMirror 6 + TanStack Virtual 紧凑桌面工作台骨架，已登记 `modernc.org/sqlite v1.63.0` 内嵌 SQLite 版本为 **`3.54.1`**。
-- [x] 落地 `bootstrap → binding → service → repository / driver` 分层、`internal/platform` Linux 图形自检、`sql/001_init.sql` 本地 `app.db`、`internal/secret` 密钥环与降级加密库，以及支持故障注入的 `internal/driver/fake/`（仅用于纯单测，不替代真库验收）。
-- [x] **已验证（Linux）**：Linux（GTK4 `4.14.5` + WebKitGTK 6.0 `2.52.6`）原生桌面二进制与精简 GTK4 AppImage 已在真实 Linux 桌面通过验证；`internal/session` 通过基于 `driver/fake` 的未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 单元测试。（Windows 实机编译与打包待验证）
+- [x] 落地 `bootstrap → binding → service → repository / driver` 分层、`internal/platform` Linux 图形自检、`sql/001_init.sql` 本地 `app.db`、`internal/secret` 密钥环与降级加密库，以及支持故障注入的 `internal/driver/fake/` (仅用于纯单测，不替代真库验收)。
+- [x] **已验证 (Linux)**：Linux (GTK4 `4.14.5` + WebKitGTK 6.0 `2.52.6`) 原生桌面二进制与精简 GTK4 AppImage 已在真实 Linux 桌面通过验证；`internal/session` 通过基于 `driver/fake` 的未确认取消→`SessionLost` 与写后断线→`CommitOutcomeUnknown` 单元测试。(Windows 实机编译与打包待验证)
 
-### Phase 1A：MySQL 8.4 查询工作台纵向验收（已完成真库验收）
-- [x] 实现 **MySQL 驱动（`go-sql-driver/mysql`）** 与 `internal/session`（双轨连接 + 旁路 `KILL QUERY` 取消栅栏）、`internal/resultbuf`（内存/临时文件快照）、`internal/sqlsplit`。
+### Phase 1A：MySQL 8.4 查询工作台纵向验收 (已完成真库验收)
+- [x] 实现 **MySQL 驱动 (`go-sql-driver/mysql`)** 与 `internal/session` (双轨连接 + 旁路 `KILL QUERY` 取消栅栏)、`internal/resultbuf` (内存/临时文件快照)、`internal/sqlsplit`。
 - [x] 打通完整人性化查询工作台：连接管理 → 双击表实时浏览 → CodeMirror 6 执行与停止 SQL → 编辑器 Execute-Once 快照翻页 → 关闭标签释放连接与快照缓存。
-- [x] **真库验收（真实 MySQL `8.4.13` + InnoDB）**：
+- [x] **真库验收 (真实 MySQL `8.4` + InnoDB)**：
   1. 停止仅影响当前语句，5 轮迟到取消竞态未误杀排队查询 B，流关闭且状态明确才复用连接，无法确认则提示原会话已结束；
-  2. 编辑器翻页不重跑 SQL（存储过程副作用计数 = 1），快照过期明确提示且不自动重跑；实时表浏览与编辑器快照严格分离；
-  3. `BIGINT`/`DECIMAL` 精度完整、`NULL` 与空串明确区分；真实只读账号 `sqlm_ro` 写表被数据库 Error 1142 拒绝；独立可写库 `sqlm_write_test` 验证自动提交写入与显式 `COMMIT` 确认丢失均报 `ERR_COMMIT_OUTCOME_UNKNOWN`（`RetrySafe=false`）且界面无重试按钮；
-  4. 已交付可复现源码、启动命令、`docker-compose.test.yml`、实测版本号与结果记录（见根目录 `README.md`）。
+  2. 编辑器翻页不重跑 SQL (存储过程副作用计数 = 1)，快照过期明确提示且不自动重跑；实时表浏览与编辑器快照严格分离；
+  3. `BIGINT`/`DECIMAL` 精度完整、`NULL` 与空串明确区分；真实只读账号 `sqlm_ro` 写表被数据库 Error 1142 拒绝；独立可写库 `sqlm_write_test` 验证自动提交写入与显式 `COMMIT` 确认丢失均报 `ERR_COMMIT_OUTCOME_UNKNOWN` (`RetrySafe=false`) 且界面无重试按钮；
+  4. 已交付可复现源码、启动命令、`docker-compose.test.yml`、实测版本号与结果记录 (见根目录 `README.md`)。
 
-### Phase 1B：PostgreSQL 抽象中立性检验（已完成真库验收）
-- [x] 实现 **PostgreSQL 驱动（`pgx/v5`）**，用真实 PostgreSQL `16.16` 验证公共接口没有写死 MySQL 假设（切库自动重建连接、`Database → Schema → Table` 三层浏览、`SEQUENCE` 浏览、`CancelRequest`、`AliveFailedTx`、原生 `INSERT ... RETURNING *` Execute-Once）；**仅在暴露真实差异处新增 1 个单方法可选接口 `driver.SchemaSwitcher`**，MySQL 驱动与公共核心零侵入。
+### Phase 1B：PostgreSQL 抽象中立性检验 (已完成真库验收)
+- [x] 实现 **PostgreSQL 驱动 (`pgx/v5`)**，用真实 PostgreSQL `16` 验证公共接口没有写死 MySQL 假设 (切库自动重建连接、`Database → Schema → Table` 三层浏览、`SEQUENCE` 浏览、`CancelRequest`、`AliveFailedTx`、原生 `INSERT ... RETURNING *` Execute-Once)；**仅在暴露真实差异处新增 1 个单方法可选接口 `driver.SchemaSwitcher`**，MySQL 驱动与公共核心零侵入。
 
-### Phase 1C：MariaDB 与 SQLite 分别验收 — 门禁 Gate 1（已完成真库验收，Gate 1 达成）
-- [x] 完成 **MariaDB `11.4.13`**（复用 MySQL 传输层 + 原生 `SEQUENCE` 枚举 + 超时错误码 `1969` + `MariaSQL` 编辑器方言）真库全量验收，通过取消/迟到取消竞态、`INSERT ... RETURNING *` Execute-Once、MyISAM/无主键判定、只读账号拒写与断线报结果未知。
-- [x] 完成 **SQLite `3.54.1`** 纯 Go 目标库驱动（原生文件选择器、不静默建空库、引擎级 `mode=ro` + `PRAGMA query_only = ON`、单文件对象树与 `SQLite` 编辑器方言）真库全量验收，并提前通过 **3.2 `VACUUM` 隐式 `rowid` 重排 (`2→1`) 回归用例**（严格拒绝隐式 `rowid` 与部分唯一索引作为稳定行键）。
-- [x] **Gate 1 门禁达成**：MySQL `8.4.13`、PostgreSQL `16.16`、MariaDB `11.4.13`、SQLite `3.54.1` 全部通过查询/取消/只读/翻页实测验收，可正式进入 Phase 2。
+### Phase 1C：MariaDB 与 SQLite 分别验收 — 门禁 Gate 1 (已完成真库验收，Gate 1 达成)
+- [x] 完成 **MariaDB `11.4`** (复用 MySQL 传输层 + 原生 `SEQUENCE` 枚举 + 超时错误码 `1969` + `MariaSQL` 编辑器方言) 真库全量验收，通过取消/迟到取消竞态、`INSERT ... RETURNING *` Execute-Once、MyISAM/无主键判定、只读账号拒写与断线报结果未知。
+- [x] 完成 **SQLite `3.54.1`** 纯 Go 目标库驱动 (原生文件选择器、不静默建空库、引擎级 `mode=ro` + `PRAGMA query_only = ON`、单文件对象树与 `SQLite` 编辑器方言) 真库全量验收，并提前通过 **3.2 `VACUUM` 隐式 `rowid` 重排 (`2→1`) 回归用例** (严格拒绝隐式 `rowid` 与部分唯一索引作为稳定行键)。
+- [x] **Gate 1 门禁达成**：MySQL `8.4`、PostgreSQL `16`、MariaDB `11.4`、SQLite `3.54.1` 全部通过查询/取消/只读/翻页实测验收，正式进入 Phase 2。
 
-### Phase 2：安全网格写入、SSH 隧道与智能补全 — 门禁 Gate 2（2–3 周）
-- [x] **Phase 2C（已完成真库验收）**：实现零本地监听端口 SSH 隧道池（TOFU 指纹、可选长效保存/每次输入/弹窗覆盖保存、`tunnelConn` 通道超时与防死锁升级）与完整 5 模式 SSL/TLS（含 `verify-ca` 证书链严校、`verify-full`、`mTLS`、禁明文降级），并在真实 MySQL 8.4 / MariaDB 11.4 / PostgreSQL 16 Docker 集群完成全链路实测。
-- [ ] 实现后端 `InspectTableEditability` 三维度判定、`internal/changeset` 参数化 `ChangePlan` 与乐观并发冲突检测（MySQL 开启 `clientFoundRows=true`）。
-- [ ] 上线网格行内编辑（无稳定键仅允许新增、SQLite 禁隐式 `rowid`、MyISAM 禁整批提交、冲突保留草稿）、Value Inspector、基于 Schema 的 SQL 自动补全、查询历史与生产高危 SQL 二次确认。
-- [ ] **Gate 2 门禁**：通过 3.1“网格写入”全部场景与 3.2 的 `VACUUM` `rowid` 回归用例（行定位判定部分已于 Phase 1C 回归通过，Phase 2 补齐端到端写入校验）。
+### Phase 2：安全网格写入、SSH 隧道与智能补全 — 门禁 Gate 2
+- [x] **SSH 隧道与 SSL/TLS (已完成四库真库验收)**：实现零本地监听端口 SSH 隧道池 (TOFU 指纹、可选长效保存/每次输入/弹窗覆盖保存、`tunnelConn` 通道超时与防死锁升级) 与完整 5 模式 SSL/TLS (含 `verify-ca` 证书链严校、`verify-full`、`mTLS`、禁明文降级)，并在真实 MySQL 8.4 / MariaDB 11.4 / PostgreSQL 16 Docker 集群完成全链路实测。
+- [x] **后端事务网格写入引擎 (已完成四库真库验收)**：落地六条核心写入边界 (`ChangePlan` + `PlanStore` 单持有者状态机、`SourceRef` + `session.Manager.AcquireOperation`、`TableWriteInspector`/`TableWriteStarter`/`TableWriteTx`、驱动权威三态 `CommitResult`、分离 `NewCellValue`/`OriginalCellValue` 与方言比较谓词、完整 `SchemaFingerprint` 事务内复核、`ChangeService` 与 Wails `ChangeBinding`)，并通过单测、SQLite 3.54.1 回归与 Docker 三真库 CI (`HESPER_REQUIRE_REAL_DB=1`) 全量验收。
+- [ ] **前端网格行内编辑与变更预览**：上线前端实时表浏览行内编辑 (`useGridEditStore`、`DataGrid` 编辑态、`ChangePlanModal` 同源 SQL 预览与 SSH 质询闭环、冲突行高亮与草稿保护)、Value Inspector 与快捷键接入。
+- [ ] **Gate 2 门禁**：完成安全网格写入前后端全链路验收后达成 Gate 2。
 
 ### Phase 3：透明表设计器与流式导入导出 — 门禁 Gate 3（2–3 周）
 - [ ] 各驱动实现 `MigrationPlanner` 与 `MigrationExecutor`，输出准确原子性边界与五态 `MigrationReport`；实现 SQLite 含依赖视图与 `INSTEAD OF` 触发器的完整重建引擎。

@@ -250,6 +250,23 @@ func (s *QueryService) ExecuteSQL(ctx context.Context, req dto.ExecuteSQLRequest
 		}, nil
 	}
 
+	// Fail closed BEFORE high-risk inspection or DB execution if any selected statement
+	// is an unclosed/unsupported compound block so inner statements are never sent standalone.
+	for _, st := range stmts {
+		if st.SplitError != "" {
+			info := ts.Info()
+			return &dto.ExecuteSQLResponse{
+				TabID:         req.TabID,
+				ExecID:        execID,
+				CurrentDB:     info.CurrentDB,
+				CurrentSchema: info.CurrentSchema,
+				SessionState:  info.SessionState,
+				SessionEpoch:  info.SessionEpoch,
+				Error:         dto.NewAppError(dto.ErrInvalidArgument, st.SplitError, st.Text),
+			}, nil
+		}
+	}
+
 	// Production high-risk safeguard (docs/03 §4.2): inspect the exact statements that will execute,
 	// fail closed if connection safety metadata cannot be read, and bind confirmation to a digest
 	// of the exact statements and matched risks using the session's verified ConnectionID.

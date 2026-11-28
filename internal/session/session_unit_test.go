@@ -256,3 +256,52 @@ func TestExecuteStatement_QueryRoutingAndReadOnlyGuardrail(t *testing.T) {
 		})
 	}
 }
+
+func TestTabSessionSplitErrorAndChainAndMySQLEnd(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. SplitError guard + COMMIT/END/ROLLBACK AND CHAIN session state transitions.
+	mgr, _ := newFakeSessionManager(fake.FaultBehavior{})
+	defer mgr.CloseAll()
+
+	ts, err := mgr.GetOrCreateTabSession(ctx, "tab-chain", "conn-chain", "demo", "")
+	if err != nil {
+		t.Fatalf("GetOrCreateTabSession: %v", err)
+	}
+
+	// Unclosed compound block with SplitError MUST be rejected without executing on driver!
+	unclosed := sqlsplit.Split("CREATE FUNCTION f() RETURNS INT LANGUAGE SQL BEGIN ATOMIC SELECT 1;", sqlsplit.DialectPostgres)[0]
+	outBlocked := ts.ExecuteStatement(ctx, "e-split-err", unclosed, nil)
+	if outBlocked.Error == nil || outBlocked.Error.Code != dto.ErrInvalidArgument {
+		t.Fatalf("expected ErrInvalidArgument for SplitError statement, got %+v", outBlocked)
+	}
+
+	// BEGIN -> InTx -> END AND CHAIN -> stays InTx -> ROLLBACK AND CHAIN -> stays InTx -> END WORK AND NO CHAIN -> Idle!
+	if out := ts.ExecuteStatement(ctx, "e-begin", sqlsplit.Split("BEGIN", sqlsplit.DialectPostgres)[0], nil); out.Error != nil || out.SessionState != dto.SessionAliveInTx {
+		t.Fatalf("expected InTx after BEGIN, got %+v", out)
+	}
+	if out := ts.ExecuteStatement(ctx, "e-end-chain", sqlsplit.Split("END AND CHAIN", sqlsplit.DialectPostgres)[0], nil); out.Error != nil || out.SessionState != dto.SessionAliveInTx {
+		t.Fatalf("expected InTx after PG END AND CHAIN, got %+v", out)
+	}
+	if out := ts.ExecuteStatement(ctx, "e-rb-chain", sqlsplit.Split("ROLLBACK AND CHAIN", sqlsplit.DialectPostgres)[0], nil); out.Error != nil || out.SessionState != dto.SessionAliveInTx {
+		t.Fatalf("expected InTx after PG ROLLBACK AND CHAIN, got %+v", out)
+	}
+	if out := ts.ExecuteStatement(ctx, "e-end-no-chain", sqlsplit.Split("END WORK AND NO CHAIN", sqlsplit.DialectPostgres)[0], nil); out.Error != nil || out.SessionState != dto.SessionAliveIdle {
+		t.Fatalf("expected Idle after PG END WORK AND NO CHAIN, got %+v", out)
+	}
+
+	// 2. MySQL standalone END is KindOther (NOT KindCommit): wire drop after write MUST NOT report SessionCommitUnknown!
+	dropMgr, _ := newFakeSessionManager(fake.FaultBehavior{DropAfterWrite: true})
+	defer dropMgr.CloseAll()
+
+	tsMy, err := dropMgr.GetOrCreateTabSession(ctx, "tab-my-end", "conn-my", "demo", "")
+	if err != nil {
+		t.Fatalf("GetOrCreateTabSession mysql: %v", err)
+	}
+
+	myEnd := sqlsplit.Split("END", sqlsplit.DialectMySQL)[0]
+	outMyEnd := tsMy.ExecuteStatement(ctx, "e-my-end", myEnd, nil)
+	if outMyEnd.Error == nil || outMyEnd.Error.Code == dto.ErrCommitOutcomeUnknown || outMyEnd.SessionState == dto.SessionCommitUnknown {
+		t.Fatalf("MySQL standalone END must NOT enter commit-unknown tracking, got %+v", outMyEnd)
+	}
+}

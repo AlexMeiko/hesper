@@ -421,30 +421,29 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, _, table string) (*dto.Ta
 	if db == "" {
 		db = "main"
 	}
-	detail := &dto.TableDetail{
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
 		Database: db,
-		Name:     table,
-		Engine:   "SQLite",
-	}
-
-	cols, _, err := c.readColumns(ctx, db, table)
+		Table:    table,
+	}, c.readOnly)
 	if err != nil {
 		return nil, err
 	}
-	detail.Columns = cols
-
 	idxs, _, err := c.readIndexes(ctx, db, table)
 	if err != nil {
 		return nil, err
 	}
-	detail.Indexes = idxs
-
-	edit, err := c.InspectTableEditability(ctx, db, "", table, c.readOnly)
-	if err != nil {
-		return nil, err
+	cols := make([]dto.ColumnDetail, len(ws.Columns))
+	for i, wc := range ws.Columns {
+		cols[i] = wc.Detail
 	}
-	detail.Editability = edit
-	return detail, nil
+	return &dto.TableDetail{
+		Database:    ws.Database,
+		Name:        ws.Table,
+		Engine:      ws.StorageEngine,
+		Columns:     cols,
+		Indexes:     idxs,
+		Editability: ws.Editability,
+	}, nil
 }
 
 func (c *Conn) GetTableDDL(ctx context.Context, db, _, table string) (string, error) {
@@ -482,64 +481,16 @@ func (c *Conn) GetTableDDL(ctx context.Context, db, _, table string) (string, er
 	return strings.Join(parts, "\n\n"), nil
 }
 
-// InspectTableEditability computes 3-dimension editability for SQLite.
-// CRITICAL RULE (Section 3.2 VACUUM rowid regression):
-// Only EXPLICIT PRIMARY KEY (including INTEGER PRIMARY KEY) or non-partial UNIQUE index
-// over all NOT NULL columns qualifies for row identity. Implicit rowid is STRICTLY REJECTED.
+// InspectTableEditability computes 3-dimension editability for SQLite via strict InspectWriteSchema.
 func (c *Conn) InspectTableEditability(ctx context.Context, db, _, table string, clientReadOnly bool) (dto.TableEditability, error) {
-	if db == "" {
-		db = "main"
-	}
-	edit := dto.TableEditability{
-		CanWrite:           !clientReadOnly && !c.readOnly,
-		RowIdentity:        dto.RowIdentityNone,
-		BatchTransactional: true,
-		StorageEngine:      "SQLite",
-	}
-	if clientReadOnly || c.readOnly {
-		edit.Reasons = append(edit.Reasons, "连接已启用只读模式 (mode=ro / query_only)")
-	}
-
-	cols, pkCols, err := c.readColumns(ctx, db, table)
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
+		Database: db,
+		Table:    table,
+	}, clientReadOnly)
 	if err != nil {
-		return edit, err
+		return dto.TableEditability{}, err
 	}
-	notNullByCol := make(map[string]bool, len(cols))
-	for _, col := range cols {
-		notNullByCol[col.Name] = !col.Nullable
-	}
-
-	if len(pkCols) > 0 {
-		edit.RowIdentity = dto.RowIdentityPrimaryKey
-		edit.KeyColumns = pkCols
-		return edit, nil
-	}
-
-	// No explicit primary key: check for a non-partial UNIQUE index covering only NOT NULL columns.
-	_, idxMeta, err := c.readIndexes(ctx, db, table)
-	if err != nil {
-		return edit, err
-	}
-	for _, idx := range idxMeta {
-		if !idx.unique || idx.partial || len(idx.columns) == 0 || idx.hasExpression {
-			continue
-		}
-		allNotNull := true
-		for _, colName := range idx.columns {
-			if !notNullByCol[colName] {
-				allNotNull = false
-				break
-			}
-		}
-		if allNotNull {
-			edit.RowIdentity = dto.RowIdentityUniqueNotNull
-			edit.KeyColumns = idx.columns
-			return edit, nil
-		}
-	}
-
-	edit.Reasons = append(edit.Reasons, "SQLite 表缺少显式主键或全列非空唯一键 (禁止使用隐式 rowid 延迟定位行，因 VACUUM 会重排 rowid)")
-	return edit, nil
+	return ws.Editability, nil
 }
 
 func (c *Conn) FetchCompletionCatalog(ctx context.Context, db, _ string) (*dto.CompletionCatalog, error) {
@@ -616,10 +567,9 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 		pkSet[k] = true
 	}
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "SELECT * FROM %s.%s", QuoteIdent(db), QuoteIdent(req.Table))
+	var whereAndOrder strings.Builder
 	if filter := strings.TrimSpace(req.FilterWhere); filter != "" {
-		fmt.Fprintf(&b, " WHERE %s", filter)
+		fmt.Fprintf(&whereAndOrder, " WHERE %s", filter)
 	}
 
 	var orderCols []string
@@ -629,59 +579,108 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 		if strings.EqualFold(req.SortDir, "desc") {
 			dir = "DESC"
 		}
-		fmt.Fprintf(&b, " ORDER BY %s %s", QuoteIdent(req.SortColumn), dir)
+		fmt.Fprintf(&whereAndOrder, " ORDER BY %s %s", QuoteIdent(req.SortColumn), dir)
 		orderCols = append(orderCols, req.SortColumn)
 		for _, k := range edit.KeyColumns {
 			if k != req.SortColumn {
-				fmt.Fprintf(&b, ", %s ASC", QuoteIdent(k))
+				fmt.Fprintf(&whereAndOrder, ", %s ASC", QuoteIdent(k))
 				orderCols = append(orderCols, k)
 			}
 		}
 		stableOrder = len(edit.KeyColumns) > 0
 	} else if len(edit.KeyColumns) > 0 {
-		b.WriteString(" ORDER BY ")
+		whereAndOrder.WriteString(" ORDER BY ")
 		for i, k := range edit.KeyColumns {
 			if i > 0 {
-				b.WriteString(", ")
+				whereAndOrder.WriteString(", ")
 			}
-			fmt.Fprintf(&b, "%s ASC", QuoteIdent(k))
+			fmt.Fprintf(&whereAndOrder, "%s ASC", QuoteIdent(k))
 			orderCols = append(orderCols, k)
 		}
 		stableOrder = true
 	}
 
 	offset := (page - 1) * pageSize
-	fmt.Fprintf(&b, " LIMIT %d OFFSET %d", pageSize+1, offset)
-	execSQL := b.String()
+	fmt.Fprintf(&whereAndOrder, " LIMIT %d OFFSET %d", pageSize+1, offset)
+	suffix := whereAndOrder.String()
+
+	displaySQL := fmt.Sprintf("SELECT * FROM %s.%s%s", QuoteIdent(db), QuoteIdent(req.Table), suffix)
+
+	// Projection strategy for SQLite BrowseTable:
+	//   - Paired typed select (1..1000 cols): projects (CASE..., typeof(col)) per column (<= 2000 result cols).
+	//   - Wide typed select (> 1000 cols): projects ONLY (CASE WHEN typeof(col) = 'text' THEN '' || col ELSE col END)
+	//     so result columns stay <= SQLite's default 2000-column limit while still preventing modernc.org/sqlite
+	//     from reformatting DATETIME text, and derives StorageClass from the scanned Go driver value.
+	//   - Fallback (no colsInfo): SELECT *.
+	const maxPairedTypeofCols = 1000
+	var actualSQL string
+	useMetaCols := len(colsInfo) > 0
+	usePairedTypeof := useMetaCols && len(colsInfo) <= maxPairedTypeofCols
+	if useMetaCols {
+		var sb strings.Builder
+		sb.WriteString("SELECT ")
+		for i, col := range colsInfo {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			qCol := QuoteIdent(col.Name)
+			if usePairedTypeof {
+				fmt.Fprintf(&sb, "CASE WHEN typeof(%s) = 'text' THEN '' || %s ELSE %s END, typeof(%s)", qCol, qCol, qCol, qCol)
+			} else {
+				fmt.Fprintf(&sb, "CASE WHEN typeof(%s) = 'text' THEN '' || %s ELSE %s END", qCol, qCol, qCol)
+			}
+		}
+		fmt.Fprintf(&sb, " FROM %s.%s%s", QuoteIdent(db), QuoteIdent(req.Table), suffix)
+		actualSQL = sb.String()
+	} else {
+		actualSQL = displaySQL
+	}
 
 	start := time.Now()
-	rows, err := c.conn.QueryContext(ctx, execSQL)
+	rows, err := c.conn.QueryContext(ctx, actualSQL)
 	if err != nil {
 		return nil, classifySQLiteError(err)
 	}
 
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		_ = rows.Close()
-		return nil, classifySQLiteError(err)
-	}
-
-	cols := make([]dto.ColumnMeta, len(colTypes))
-	for i, ct := range colTypes {
-		dbType := ct.DatabaseTypeName()
-		cols[i] = dto.ColumnMeta{
-			Name:         ct.Name(),
-			DatabaseType: dbType,
-			Kind:         classifySQLiteColumnKind(dbType),
-			Nullable:     true,
-			IsPrimaryKey: pkSet[ct.Name()],
+	var cols []dto.ColumnMeta
+	if useMetaCols {
+		cols = make([]dto.ColumnMeta, len(colsInfo))
+		for i, ci := range colsInfo {
+			cols[i] = dto.ColumnMeta{
+				Name:         ci.Name,
+				DatabaseType: ci.DataType,
+				Kind:         classifySQLiteColumnKind(ci.DataType),
+				Nullable:     ci.Nullable,
+				IsPrimaryKey: pkSet[ci.Name],
+			}
+		}
+	} else {
+		colTypes, err := rows.ColumnTypes()
+		if err != nil {
+			_ = rows.Close()
+			return nil, classifySQLiteError(err)
+		}
+		cols = make([]dto.ColumnMeta, len(colTypes))
+		for i, ct := range colTypes {
+			dbType := ct.DatabaseTypeName()
+			cols[i] = dto.ColumnMeta{
+				Name:         ct.Name(),
+				DatabaseType: dbType,
+				Kind:         classifySQLiteColumnKind(dbType),
+				Nullable:     true,
+				IsPrimaryKey: pkSet[ct.Name()],
+			}
 		}
 	}
 
 	var data [][]dto.CellValue
 	hasMore := false
-	scanVals := make([]any, len(cols))
-	scanPtrs := make([]any, len(cols))
+	scanCount := len(cols)
+	if usePairedTypeof {
+		scanCount = len(cols) * 2
+	}
+	scanVals := make([]any, scanCount)
+	scanPtrs := make([]any, scanCount)
 	for i := range scanVals {
 		scanPtrs[i] = &scanVals[i]
 	}
@@ -697,7 +696,25 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 		}
 		row := make([]dto.CellValue, len(cols))
 		for i := range cols {
-			row[i] = convertSQLiteCell(scanVals[i], cols[i], nil)
+			if usePairedTypeof {
+				val := scanVals[i*2]
+				sc, _ := scanVals[i*2+1].(string)
+				cell := convertSQLiteCell(val, cols[i], nil)
+				if sc != "" {
+					cell.StorageClass = sc
+				}
+				row[i] = cell
+			} else if useMetaCols {
+				val := scanVals[i]
+				sc := inferSQLiteStorageClass(val)
+				cell := convertSQLiteCell(val, cols[i], nil)
+				if sc != "" {
+					cell.StorageClass = sc
+				}
+				row[i] = cell
+			} else {
+				row[i] = convertSQLiteCell(scanVals[i], cols[i], nil)
+			}
 		}
 		data = append(data, row)
 	}
@@ -728,7 +745,7 @@ func (c *Conn) BrowseTable(ctx context.Context, req dto.BrowseTableRequest, edit
 		TotalKnown:      totalKnown,
 		TotalRows:       totalRows,
 		DurationMs:      time.Since(start).Milliseconds(),
-		ExecutedSQL:     execSQL,
+		ExecutedSQL:     displaySQL,
 		StableOrderUsed: stableOrder,
 		OrderColumns:    orderCols,
 		Editability:     edit,
@@ -743,7 +760,7 @@ type pkEntry struct {
 }
 
 func (c *Conn) readColumns(ctx context.Context, db, table string) ([]dto.ColumnDetail, []string, error) {
-	q := fmt.Sprintf("PRAGMA %s.table_info(%s)", QuoteIdent(db), QuoteIdent(table))
+	q := fmt.Sprintf("PRAGMA %s.table_xinfo(%s)", QuoteIdent(db), QuoteIdent(table))
 	rows, err := c.conn.QueryContext(ctx, q)
 	if err != nil {
 		return nil, nil, classifySQLiteError(err)
@@ -755,20 +772,32 @@ func (c *Conn) readColumns(ctx context.Context, db, table string) ([]dto.ColumnD
 	for rows.Next() {
 		var cid int
 		var name, colType string
-		var notNull, pk int
+		var notNull, pk, hidden int
 		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk, &hidden); err != nil {
 			return nil, nil, err
 		}
+		if hidden == 1 {
+			continue
+		}
+		genKind := ""
+		if hidden == 2 {
+			genKind = "virtual"
+		} else if hidden == 3 {
+			genKind = "stored"
+		}
 		col := dto.ColumnDetail{
-			Name:         name,
-			DataType:     colType,
-			ColumnType:   colType,
-			Nullable:     notNull == 0,
-			IsPrimaryKey: pk > 0,
-			HasDefault:   dflt.Valid,
-			DefaultValue: dflt.String,
-			OrdinalPos:   cid + 1,
+			Name:          name,
+			DataType:      colType,
+			ColumnType:    colType,
+			Nullable:      notNull == 0,
+			IsPrimaryKey:  pk > 0,
+			HasDefault:    dflt.Valid,
+			DefaultValue:  dflt.String,
+			GeneratedKind: genKind,
+			Insertable:    genKind == "",
+			Updatable:     genKind == "",
+			OrdinalPos:    len(cols) + 1,
 		}
 		if pk > 0 {
 			pks = append(pks, pkEntry{name: name, order: pk})
@@ -796,8 +825,12 @@ type sqliteIndexMeta struct {
 }
 
 func (c *Conn) readIndexes(ctx context.Context, db, table string) ([]dto.IndexDetail, []sqliteIndexMeta, error) {
-	q := fmt.Sprintf("PRAGMA %s.index_list(%s)", QuoteIdent(db), QuoteIdent(table))
-	rows, err := c.conn.QueryContext(ctx, q)
+	return c.readIndexesWith(ctx, c.conn, db, table)
+}
+
+func (c *Conn) readIndexesWith(ctx context.Context, q sqliteQuerier, db, table string) ([]dto.IndexDetail, []sqliteIndexMeta, error) {
+	iqList := fmt.Sprintf("PRAGMA %s.index_list(%s)", QuoteIdent(db), QuoteIdent(table))
+	rows, err := q.QueryContext(ctx, iqList)
 	if err != nil {
 		return nil, nil, classifySQLiteError(err)
 	}
@@ -833,22 +866,28 @@ func (c *Conn) readIndexes(ctx context.Context, db, table string) ([]dto.IndexDe
 	metas := make([]sqliteIndexMeta, 0, len(rawList))
 	for _, r := range rawList {
 		iq := fmt.Sprintf("PRAGMA %s.index_info(%s)", QuoteIdent(db), QuoteIdent(r.name))
-		irows, ierr := c.conn.QueryContext(ctx, iq)
+		irows, ierr := q.QueryContext(ctx, iq)
 		if ierr != nil {
-			continue
+			return nil, nil, classifySQLiteError(ierr)
 		}
 		var colNames []string
 		hasExpr := false
 		for irows.Next() {
 			var seqno, cid int
 			var cname sql.NullString
-			if irows.Scan(&seqno, &cid, &cname) == nil {
-				if cid < 0 || !cname.Valid {
-					hasExpr = true
-				} else {
-					colNames = append(colNames, cname.String)
-				}
+			if err := irows.Scan(&seqno, &cid, &cname); err != nil {
+				_ = irows.Close()
+				return nil, nil, err
 			}
+			if cid < 0 || !cname.Valid {
+				hasExpr = true
+			} else {
+				colNames = append(colNames, cname.String)
+			}
+		}
+		if err := irows.Err(); err != nil {
+			_ = irows.Close()
+			return nil, nil, classifySQLiteError(err)
 		}
 		_ = irows.Close()
 
@@ -927,6 +966,26 @@ func (s *sqliteRowStream) Close() error {
 }
 
 // --- Value Fidelity Conversion ---
+
+// inferSQLiteStorageClass maps the raw Go value scanned from SQLite's CASE text-preserving projection
+// back to SQLite's exact typeof() storage class ("null"|"integer"|"real"|"text"|"blob"), used for
+// wide tables (> 1000 columns) so BrowseTable stays within SQLITE_MAX_COLUMN without losing edit metadata.
+func inferSQLiteStorageClass(raw any) string {
+	switch raw.(type) {
+	case nil:
+		return "null"
+	case int64, int, int32, int16, int8, uint64, uint, uint32, uint16, uint8:
+		return "integer"
+	case float64, float32:
+		return "real"
+	case string:
+		return "text"
+	case []byte:
+		return "blob"
+	default:
+		return ""
+	}
+}
 
 func convertSQLiteCell(raw any, col dto.ColumnMeta, regBlob driver.BlobRegistrar) dto.CellValue {
 	if raw == nil {

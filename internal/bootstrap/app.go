@@ -13,6 +13,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"hesper/internal/binding"
+	"hesper/internal/changeset"
 	"hesper/internal/config"
 	"hesper/internal/driver"
 	"hesper/internal/driver/mysql"
@@ -65,11 +66,15 @@ func Run(paths config.Paths, assets fs.FS) error {
 	schemaSvc := service.NewSchemaService(sessMgr)
 	querySvc := service.NewQueryService(sessMgr, resMgr, localDB)
 	querySvc.SetSSHSecretPreparer(connSvc.PrepareRuntimeSSHCredential)
+	planStore := changeset.NewPlanStore(changeset.PlanStoreOptions{})
+	changeSvc := service.NewChangeService(sessMgr, localDB, planStore)
+	changeSvc.SetSSHSecretPreparer(connSvc.PrepareRuntimeSSHCredential)
 
 	// 6. Thin Wails v3 boundary adapters.
 	connBinding := binding.NewConnectionBinding(connSvc)
 	schemaBinding := binding.NewSchemaBinding(schemaSvc)
 	queryBinding := binding.NewQueryBinding(querySvc)
+	changeBinding := binding.NewChangeBinding(changeSvc)
 	streamBinding := binding.NewStreamBinding(querySvc)
 
 	// Optional port override for headless `-tags server` mode.
@@ -89,6 +94,7 @@ func Run(paths config.Paths, assets fs.FS) error {
 			application.NewService(connBinding),
 			application.NewService(schemaBinding),
 			application.NewService(queryBinding),
+			application.NewService(changeBinding),
 			application.NewServiceWithOptions(streamBinding, application.ServiceOptions{
 				Route: "/stream",
 			}),

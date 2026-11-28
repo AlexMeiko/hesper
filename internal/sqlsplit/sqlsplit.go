@@ -20,36 +20,39 @@ const (
 type StatementKind string
 
 const (
-	KindQuery    StatementKind = "query"    // SELECT, SHOW, DESCRIBE, EXPLAIN, VALUES, TABLE, WITH ... SELECT
-	KindBegin    StatementKind = "begin"    // BEGIN, START TRANSACTION
-	KindCommit   StatementKind = "commit"   // COMMIT
+	KindQuery               StatementKind = "query"                 // SELECT, SHOW, DESCRIBE, EXPLAIN, VALUES, TABLE, WITH ... SELECT
+	KindBegin               StatementKind = "begin"                 // BEGIN, START TRANSACTION
+	KindCommit              StatementKind = "commit"                // COMMIT
 	KindRollback            StatementKind = "rollback"              // ROLLBACK (full transaction rollback)
 	KindRollbackToSavepoint StatementKind = "rollback_to_savepoint" // ROLLBACK [WORK|TRANSACTION] TO [SAVEPOINT] sp
-	KindUse      StatementKind = "use"      // USE db (MySQL)
-	KindSet      StatementKind = "set"      // SET ...
-	KindWrite    StatementKind = "write"    // INSERT, UPDATE, DELETE, REPLACE, MERGE, CALL, DO, LOAD
-	KindDDL      StatementKind = "ddl"      // CREATE, ALTER, DROP, TRUNCATE, RENAME, GRANT, REVOKE
-	KindOther    StatementKind = "other"
+	KindUse                 StatementKind = "use"                   // USE db (MySQL)
+	KindSet                 StatementKind = "set"                   // SET ...
+	KindWrite               StatementKind = "write"                 // INSERT, UPDATE, DELETE, REPLACE, MERGE, CALL, DO, LOAD
+	KindDDL                 StatementKind = "ddl"                   // CREATE, ALTER, DROP, TRUNCATE, RENAME, GRANT, REVOKE
+	KindOther               StatementKind = "other"
 )
 
 // Statement represents one lexically separated SQL statement with source coordinates.
 type Statement struct {
-	Text        string
-	StartOffset int
-	EndOffset   int
-	StartLine   int
-	EndLine     int
-	Kind        StatementKind
-	FirstWord   string
-	MutatesData bool // true for write/DDL/CALL/CTE-with-write statements
-	ReturnsRows bool // true when the DB returns a result set (queries, EXPLAIN, MariaDB ANALYZE <stmt>, CALL, RETURNING, CTE-with-SELECT)
-	tokens      []sqlToken
+	Text         string
+	StartOffset  int
+	EndOffset    int
+	StartLine    int
+	EndLine      int
+	Kind         StatementKind
+	FirstWord    string
+	MutatesData  bool   // true for write/DDL/CALL/CTE-with-write statements
+	ReturnsRows  bool   // true when the DB returns a result set (queries, EXPLAIN, MariaDB ANALYZE <stmt>, CALL, RETURNING, CTE-with-SELECT)
+	StartsNextTx bool   // true for COMMIT/ROLLBACK/END ... AND CHAIN (immediately begins a chained tx on success)
+	SplitError   string // non-empty when the splitter refused to split an unclosed or unsupported compound block
+	tokens       []sqlToken
 }
 
 // Split splits SQL text into individual statements using a dialect-aware state machine.
-// Handles single/double/backtick quotes, escaped quotes, line comments (-- and MySQL #),
-// block comments (nested in PG), MySQL/MariaDB executable comments (/*!...*/ / /*M!...*/),
-// PostgreSQL $tag$...$tag$ dollar quoting, and MySQL DELIMITER.
+// Handles single/double/backtick quotes, SQLite [...] identifiers, escaped quotes, line comments
+// (-- and MySQL #), block comments (nested in PG), MySQL/MariaDB executable comments (/*!...*/ / /*M!...*/),
+// PostgreSQL $tag$...$tag$ dollar quoting, MySQL DELIMITER, and dialect-specific compound blocks
+// (SQLite CREATE TRIGGER ... ; END ;, MySQL/MariaDB routines/triggers/events, PG BEGIN ATOMIC ... END).
 func Split(src string, dialect Dialect) []Statement {
 	var stmts []Statement
 	delimiter := ";"
@@ -58,8 +61,17 @@ func Split(src string, dialect Dialect) []Statement {
 	stmtStart := -1
 	stmtStartLine := 1
 	line := 1
+	inExecComment := false
+	tracker := newCompoundTracker(dialect)
 
-	flush := func(end int) {
+	flush := func(end int, atEOF bool) {
+		var splitErr string
+		if delimiter == ";" {
+			splitErr = tracker.finalizeError(atEOF)
+		}
+		tracker.reset()
+		inExecComment = false
+
 		if stmtStart < 0 || end <= stmtStart {
 			stmtStart = -1
 			return
@@ -80,18 +92,29 @@ func Split(src string, dialect Dialect) []Statement {
 		realEnd := realStart + len(trimmed)
 		realStartLine := lineAtOffset(src, realStart)
 		realEndLine := lineAtOffset(src, realEnd)
-		kind, firstWord, mutates, returnsRows := classifyTokensDetail(tokens, 0, trimmed, dialect)
+		kind, firstWord, mutates, returnsRows, startsNextTx := classifyTokensDetail(tokens, 0, trimmed, dialect)
+		if dialect == DialectMySQL && splitErr == "" && isMySQLUnsupportedAnonBlockRaw(trimmed) {
+			splitErr = errMariaDBAnonBlockUnsupported
+		}
+		if splitErr == errMariaDBAnonBlockUnsupported {
+			kind = KindOther
+			mutates = true
+			returnsRows = false
+			startsNextTx = false
+		}
 		stmts = append(stmts, Statement{
-			Text:        trimmed,
-			StartOffset: realStart,
-			EndOffset:   realEnd,
-			StartLine:   realStartLine,
-			EndLine:     realEndLine,
-			Kind:        kind,
-			FirstWord:   firstWord,
-			MutatesData: mutates,
-			ReturnsRows: returnsRows,
-			tokens:      tokens,
+			Text:         trimmed,
+			StartOffset:  realStart,
+			EndOffset:    realEnd,
+			StartLine:    realStartLine,
+			EndLine:      realEndLine,
+			Kind:         kind,
+			FirstWord:    firstWord,
+			MutatesData:  mutates,
+			ReturnsRows:  returnsRows,
+			StartsNextTx: startsNextTx,
+			SplitError:   splitErr,
+			tokens:       tokens,
 		})
 		stmtStart = -1
 	}
@@ -99,8 +122,16 @@ func Split(src string, dialect Dialect) []Statement {
 	i := 0
 	atLineStart := true
 	for i < n {
+		// Closing delimiter of an active MySQL/MariaDB executable comment (/*! ... */ / /*M! ... */).
+		if inExecComment && src[i] == '*' && i+1 < n && src[i+1] == '/' {
+			inExecComment = false
+			i += 2
+			atLineStart = false
+			continue
+		}
+
 		// MySQL DELIMITER directive at line start (outside any open quote/comment)
-		if dialect == DialectMySQL && atLineStart && stmtStart < 0 {
+		if dialect == DialectMySQL && !inExecComment && atLineStart && stmtStart < 0 {
 			j := i
 			for j < n && (src[j] == ' ' || src[j] == '\t') {
 				j++
@@ -119,6 +150,7 @@ func Split(src string, dialect Dialect) []Statement {
 				if newDelim := strings.TrimSpace(rest); newDelim != "" {
 					delimiter = newDelim
 				}
+				tracker.reset()
 				atLineStart = true
 				continue
 			}
@@ -126,7 +158,27 @@ func Split(src string, dialect Dialect) []Statement {
 
 		// Match current delimiter
 		if delimiter != "" && strings.HasPrefix(src[i:], delimiter) {
-			flush(i)
+			if inExecComment {
+				// Never split inside an open /*! ... */ executable comment; track whether ';' closes
+				// a statement inside the comment so multi-statement executable comments fail closed.
+				if delimiter == ";" && stmtStart >= 0 && tracker.shouldSplitOnSemicolon() {
+					tracker.execCommentSawTrailingSemi = true
+				}
+				for k := 0; k < len(delimiter); k++ {
+					if delimiter[k] == '\n' {
+						line++
+					}
+				}
+				i += len(delimiter)
+				atLineStart = false
+				continue
+			}
+			if delimiter == ";" && stmtStart >= 0 && !tracker.shouldSplitOnSemicolon() {
+				i++
+				atLineStart = false
+				continue
+			}
+			flush(i, false)
 			for k := 0; k < len(delimiter); k++ {
 				if delimiter[k] == '\n' {
 					line++
@@ -146,13 +198,13 @@ func Split(src string, dialect Dialect) []Statement {
 			atLineStart = true
 			continue
 		}
-		if ch == ' ' || ch == '\t' || ch == '\r' {
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\f' || ch == '\v' {
 			i++
 			continue
 		}
 
 		// Single-line comment: -- ...
-		if ch == '-' && i+1 < n && src[i+1] == '-' && (i+2 == n || src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\r' || src[i+2] == '\n' || dialect != DialectMySQL) {
+		if ch == '-' && i+1 < n && src[i+1] == '-' && (i+2 == n || src[i+2] == ' ' || src[i+2] == '\t' || src[i+2] == '\r' || src[i+2] == '\n' || src[i+2] == '\f' || src[i+2] == '\v' || dialect != DialectMySQL) {
 			i += 2
 			for i < n && src[i] != '\n' {
 				i++
@@ -169,55 +221,21 @@ func Split(src string, dialect Dialect) []Statement {
 			continue
 		}
 
-		// Block comment /* ... */ (nested in PostgreSQL; MySQL/MariaDB /*! ... */ & /*M! ... */ are executable SQL!)
+		// Block comment /* ... */ (nested in PostgreSQL; MySQL/MariaDB /*! ... */ & /*M! ... */ are expanded
+		// using the same lexical rules as tokenizeSQL so tokens like /*!50020 DEFINER=...*/ stay visible).
 		if ch == '/' && i+1 < n && src[i+1] == '*' {
-			if prefixLen := mysqlExecCommentPrefixLen(src, i, dialect); prefixLen > 0 {
-				if stmtStart < 0 {
-					stmtStart = i
-					stmtStartLine = line
-					_ = stmtStartLine
+			if !inExecComment {
+				if prefixLen := mysqlExecCommentPrefixLen(src, i, dialect); prefixLen > 0 {
+					if stmtStart < 0 {
+						stmtStart = i
+						stmtStartLine = line
+						_ = stmtStartLine
+					}
+					inExecComment = true
+					atLineStart = false
+					i += prefixLen
+					continue
 				}
-				atLineStart = false
-				i += prefixLen
-				for i < n {
-					if src[i] == '\n' {
-						line++
-						i++
-						continue
-					}
-					if src[i] == '\'' || src[i] == '"' || src[i] == '`' {
-						q := src[i]
-						i++
-						for i < n {
-							if src[i] == '\n' {
-								line++
-							}
-							if q != '`' && src[i] == '\\' && i+1 < n {
-								if src[i+1] == '\n' {
-									line++
-								}
-								i += 2
-								continue
-							}
-							if src[i] == q {
-								if i+1 < n && src[i+1] == q {
-									i += 2
-									continue
-								}
-								i++
-								break
-							}
-							i++
-						}
-						continue
-					}
-					if src[i] == '*' && i+1 < n && src[i+1] == '/' {
-						i += 2
-						break
-					}
-					i++
-				}
-				continue
 			}
 
 			depth := 1
@@ -250,37 +268,27 @@ func Split(src string, dialect Dialect) []Statement {
 			stmtStartLine = line
 			_ = stmtStartLine
 		}
+		if delimiter == ";" {
+			tracker.noteStmtToken()
+		}
 		atLineStart = false
 
-		// Single-quoted string
-		if ch == '\'' {
-			i++
-			for i < n {
-				if src[i] == '\n' {
-					line++
-				}
-				if dialect == DialectMySQL && src[i] == '\\' && i+1 < n {
-					if src[i+1] == '\n' {
-						line++
-					}
-					i += 2
-					continue
-				}
-				if src[i] == '\'' {
-					if i+1 < n && src[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
+		// Single-quoted string (including PostgreSQL E'...' / e'...' escape string literals
+		// and multiline PostgreSQL string continuations preserving escape mode).
+		if next, nl, ok := scanSingleQuotedString(src, i, dialect, false); ok {
+			if delimiter == ";" {
+				tracker.onLiteralOrQuotedIdent()
 			}
+			line += nl
+			i = next
 			continue
 		}
 
 		// Double-quoted identifier or string
 		if ch == '"' {
+			if delimiter == ";" {
+				tracker.onLiteralOrQuotedIdent()
+			}
 			i++
 			for i < n {
 				if src[i] == '\n' {
@@ -305,6 +313,9 @@ func Split(src string, dialect Dialect) []Statement {
 
 		// Backtick identifier (MySQL / SQLite)
 		if ch == '`' && dialect != DialectPostgres {
+			if delimiter == ";" {
+				tracker.onLiteralOrQuotedIdent()
+			}
 			i++
 			for i < n {
 				if src[i] == '\n' {
@@ -323,9 +334,31 @@ func Split(src string, dialect Dialect) []Statement {
 			continue
 		}
 
+		// SQLite bracket-quoted identifier: [...]
+		if dialect == DialectSQLite && ch == '[' {
+			if delimiter == ";" {
+				tracker.onLiteralOrQuotedIdent()
+			}
+			i++
+			for i < n {
+				if src[i] == '\n' {
+					line++
+				}
+				if src[i] == ']' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
 		// PostgreSQL dollar-quoting: $$...$$ or $tag$...$tag$
 		if dialect == DialectPostgres && ch == '$' {
 			if tag, ok := parseDollarTag(src[i:]); ok {
+				if delimiter == ";" {
+					tracker.onLiteralOrQuotedIdent()
+				}
 				i += len(tag)
 				endIdx := strings.Index(src[i:], tag)
 				if endIdx < 0 {
@@ -339,10 +372,52 @@ func Split(src string, dialect Dialect) []Statement {
 			}
 		}
 
+		if delimiter == ";" {
+			switch ch {
+			case '(':
+				tracker.onLParen()
+				i++
+				continue
+			case ')':
+				tracker.onRParen()
+				i++
+				continue
+			case ':':
+				tracker.onColon()
+				i++
+				continue
+			}
+			if dialect == DialectMySQL && ch == '@' {
+				if next, isSysVar, ok := scanMySQLAtVar(src, i); ok {
+					tracker.onMySQLAtVar(isSysVar)
+					i = next
+					continue
+				}
+			}
+			r, size := utf8.DecodeRuneInString(src[i:])
+			if isDialectIdentStart(dialect, r, size) || (r >= '0' && r <= '9') {
+				start := i
+				i += size
+				for i < n {
+					nr, nsize := utf8.DecodeRuneInString(src[i:])
+					if isDialectIdentPart(dialect, nr, nsize) || nr == '$' {
+						i += nsize
+						continue
+					}
+					break
+				}
+				tracker.onWord(strings.ToUpper(src[start:i]))
+				continue
+			}
+			tracker.onSymbol(ch)
+			i += size
+			continue
+		}
+
 		i++
 	}
 
-	flush(n)
+	flush(n, true)
 	return stmts
 }
 
@@ -433,7 +508,7 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 	for i < n {
 		ch := s[i]
 
-		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f' || ch == '\v' {
 			i++
 			continue
 		}
@@ -446,7 +521,7 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 		}
 
 		// Single-line comment --
-		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || dialect != DialectMySQL) {
+		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || s[i+2] == '\f' || s[i+2] == '\v' || dialect != DialectMySQL) {
 			i += 2
 			for i < n && s[i] != '\n' {
 				i++
@@ -490,24 +565,10 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 			continue
 		}
 
-		// Single-quoted string
-		if ch == '\'' {
-			i++
-			for i < n {
-				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if s[i] == '\'' {
-					if i+1 < n && s[i+1] == '\'' {
-						i += 2
-						continue
-					}
-					i++
-					break
-				}
-				i++
-			}
+		// Single-quoted string (including PostgreSQL E'...' / e'...' escape string literals
+		// and multiline PostgreSQL string continuations preserving escape mode).
+		if next, _, ok := scanSingleQuotedString(s, i, dialect, false); ok {
+			i = next
 			continue
 		}
 
@@ -549,6 +610,19 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 			continue
 		}
 
+		// SQLite bracket-quoted identifier [...] (never treated as SQL keyword)
+		if dialect == DialectSQLite && ch == '[' {
+			i++
+			for i < n {
+				if s[i] == ']' {
+					i++
+					break
+				}
+				i++
+			}
+			continue
+		}
+
 		// PostgreSQL dollar-quoted string
 		if dialect == DialectPostgres && ch == '$' {
 			if tag, ok := parseDollarTag(s[i:]); ok {
@@ -582,14 +656,20 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 			i++
 			continue
 		}
+		if dialect == DialectMySQL && ch == '@' {
+			if next, _, ok := scanMySQLAtVar(s, i); ok {
+				i = next
+				continue
+			}
+		}
 
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isIdentStart(r) || (r >= '0' && r <= '9') {
+		if isDialectIdentStart(dialect, r, size) || (r >= '0' && r <= '9') {
 			start := i
 			i += size
 			for i < n {
 				nr, nsize := utf8.DecodeRuneInString(s[i:])
-				if isIdentPart(nr) || nr == '$' {
+				if isDialectIdentPart(dialect, nr, nsize) || nr == '$' {
 					i += nsize
 					continue
 				}
@@ -929,13 +1009,13 @@ func Classify(stmt string, dialect Dialect) (StatementKind, string, bool) {
 	if len(tokens) == 0 {
 		return KindOther, "", false
 	}
-	kind, firstWord, mutates, _ := classifyTokensDetail(tokens, 0, stmt, dialect)
+	kind, firstWord, mutates, _, _ := classifyTokensDetail(tokens, 0, stmt, dialect)
 	return kind, firstWord, mutates
 }
 
-func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect Dialect) (StatementKind, string, bool, bool) {
+func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect Dialect) (StatementKind, string, bool, bool, bool) {
 	if len(tokens) == 0 {
-		return KindOther, "", false, false
+		return KindOther, "", false, false, false
 	}
 
 	// Parenthesized statements like "(SELECT 1) UNION (SELECT 2)" or "(SELECT * FROM t)":
@@ -950,8 +1030,8 @@ func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect
 
 	// EXPLAIN ANALYZE and MariaDB ANALYZE <stmt> execute the wrapped statement AND return an execution plan result set.
 	if inner, wrapperWord, ok := unwrapExplainOrMariaAnalyze(tokens, baseDepth, dialect); ok {
-		kind, _, mutates, _ := classifyTokensDetail(inner, baseDepth, stmt, dialect)
-		return kind, wrapperWord, mutates, true
+		kind, _, mutates, _, startsNextTx := classifyTokensDetail(inner, baseDepth, stmt, dialect)
+		return kind, wrapperWord, mutates, true, startsNextTx
 	}
 
 	var topWords []string
@@ -964,7 +1044,7 @@ func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect
 		}
 	}
 	if len(topWords) == 0 {
-		return KindOther, "", false, false
+		return KindOther, "", false, false, false
 	}
 	first := topWords[0]
 	second := ""
@@ -976,9 +1056,9 @@ func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect
 	case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "VALUES", "TABLE", "PRAGMA":
 		// PRAGMA with '=' in SQLite can mutate settings
 		if first == "PRAGMA" && strings.Contains(stmt, "=") {
-			return KindSet, first, false, false
+			return KindSet, first, false, false, false
 		}
-		return KindQuery, first, false, true
+		return KindQuery, first, false, true, false
 	case "WITH":
 		// Inspect CTE bodies and trailing main statement structurally so "WITH ... SELECT ... FOR UPDATE"
 		// stays KindQuery, while data-modifying CTEs (INSERT/UPDATE/DELETE/MERGE) are classified as KindWrite.
@@ -986,54 +1066,124 @@ func classifyTokensDetail(tokens []sqlToken, baseDepth int, stmt string, dialect
 		cteBodies, mainTokens, ok := parseCTEs(tokens, baseDepth)
 		if !ok || len(mainTokens) == 0 {
 			if containsWriteKeywordFallback(tokens[1:]) {
-				return KindWrite, first, true, hasWordAtDepth(tokens[1:], baseDepth, "RETURNING")
+				return KindWrite, first, true, hasWordAtDepth(tokens[1:], baseDepth, "RETURNING"), false
 			}
-			return KindQuery, first, false, true
+			return KindQuery, first, false, true, false
 		}
 		hasWrite := false
 		for _, body := range cteBodies {
-			bKind, _, bMutates, _ := classifyTokensDetail(body, baseDepth+1, stmt, dialect)
+			bKind, _, bMutates, _, _ := classifyTokensDetail(body, baseDepth+1, stmt, dialect)
 			if bMutates || bKind == KindWrite || bKind == KindDDL {
 				hasWrite = true
 			}
 		}
-		mKind, _, mMutates, mainReturnsRows := classifyTokensDetail(mainTokens, baseDepth, stmt, dialect)
+		mKind, _, mMutates, mainReturnsRows, _ := classifyTokensDetail(mainTokens, baseDepth, stmt, dialect)
 		if mMutates || mKind == KindWrite || mKind == KindDDL {
 			hasWrite = true
 		}
 		if hasWrite {
-			return KindWrite, first, true, mainReturnsRows
+			return KindWrite, first, true, mainReturnsRows, false
 		}
-		return KindQuery, first, false, true
+		return KindQuery, first, false, true, false
 	case "BEGIN":
-		return KindBegin, first, false, false
+		if baseDepth == 0 && dialect == DialectMySQL && isMySQLUnsupportedAnonBlockRaw(stmt) {
+			return KindOther, first, true, false, false
+		}
+		return KindBegin, first, false, false, false
 	case "START":
 		if second == "TRANSACTION" {
-			return KindBegin, first, false, false
+			return KindBegin, first, false, false, false
 		}
-		return KindOther, first, false, false
-	case "COMMIT", "END":
-		return KindCommit, first, false, false
+		return KindOther, first, false, false, false
+	case "COMMIT":
+		startsNextTx := dialect != DialectSQLite && hasAndChain(topWords)
+		return KindCommit, first, false, false, startsNextTx
+	case "END":
+		switch dialect {
+		case DialectSQLite:
+			// SQLite parse.y: END | END TRANSACTION [name] (does not treat END WORK as commit).
+			if len(tokens) == len(topWords) &&
+				(len(topWords) == 1 || (second == "TRANSACTION" && (len(topWords) == 2 || len(topWords) == 3))) {
+				return KindCommit, first, false, false, false
+			}
+			return KindOther, first, false, false, false
+		case DialectPostgres:
+			// PostgreSQL: END [WORK | TRANSACTION] [AND [NO] CHAIN].
+			if len(tokens) == len(topWords) {
+				if isCommit, startsNextTx := parsePGEndCommit(topWords); isCommit {
+					return KindCommit, first, false, false, startsNextTx
+				}
+			}
+			return KindOther, first, false, false, false
+		default:
+			// MySQL / MariaDB: standalone END is not a transaction commit; let server report syntax error.
+			return KindOther, first, false, false, false
+		}
 	case "ROLLBACK":
 		if second == "TO" || ((second == "WORK" || second == "TRANSACTION") && len(topWords) > 2 && topWords[2] == "TO") {
-			return KindRollbackToSavepoint, first, false, false
+			return KindRollbackToSavepoint, first, false, false, false
 		}
 		if second == "PREPARED" {
-			return KindOther, first, false, false
+			return KindOther, first, false, false, false
 		}
-		return KindRollback, first, false, false
+		startsNextTx := dialect != DialectSQLite && hasAndChain(topWords)
+		return KindRollback, first, false, false, startsNextTx
 	case "USE":
-		return KindUse, first, false, false
+		return KindUse, first, false, false, false
 	case "SET":
-		return KindSet, first, false, false
+		return KindSet, first, false, false, false
 	case "INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE", "CALL", "DO", "LOAD", "COPY":
 		returnsRows := first == "CALL" || hasWordAtDepth(tokens[1:], baseDepth, "RETURNING")
-		return KindWrite, first, true, returnsRows
+		return KindWrite, first, true, returnsRows, false
 	case "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "GRANT", "REVOKE", "LOCK", "ANALYZE", "OPTIMIZE", "VACUUM":
-		return KindDDL, first, true, false
+		return KindDDL, first, true, false, false
 	default:
-		return KindOther, first, false, false
+		if baseDepth == 0 && dialect == DialectMySQL && isMySQLUnsupportedAnonBlockRaw(stmt) {
+			return KindOther, first, true, false, false
+		}
+		return KindOther, first, false, false, false
 	}
+}
+
+// hasAndChain reports whether top-level words contain "AND CHAIN" (and NOT "AND NO CHAIN").
+func hasAndChain(words []string) bool {
+	for i := 1; i+1 < len(words); i++ {
+		if words[i] == "AND" && words[i+1] == "CHAIN" {
+			return true
+		}
+	}
+	return false
+}
+
+// parsePGEndCommit parses PostgreSQL's official END syntax:
+//
+//	END [ WORK | TRANSACTION ] [ AND [ NO ] CHAIN ]
+func parsePGEndCommit(words []string) (isCommit bool, startsNextTx bool) {
+	if len(words) == 0 || words[0] != "END" {
+		return false, false
+	}
+	idx := 1
+	if idx < len(words) && (words[idx] == "WORK" || words[idx] == "TRANSACTION") {
+		idx++
+	}
+	if idx == len(words) {
+		return true, false
+	}
+	if words[idx] != "AND" {
+		return false, false
+	}
+	idx++
+	if idx < len(words) && words[idx] == "NO" {
+		idx++
+		if idx == len(words)-1 && words[idx] == "CHAIN" {
+			return true, false
+		}
+		return false, false
+	}
+	if idx == len(words)-1 && words[idx] == "CHAIN" {
+		return true, true
+	}
+	return false, false
 }
 
 // IsReadOnlyEscapeSet detects SET or SQLite PRAGMA statements trying to disable session read-only mode.
@@ -1070,22 +1220,54 @@ func parseDollarTag(s string) (string, bool) {
 	if s[1] == '$' {
 		return "$$", true
 	}
-	if !isIdentStart(rune(s[1])) {
+	r, size := utf8.DecodeRuneInString(s[1:])
+	if !isPGDollarTagStart(r, size) {
 		return "", false
 	}
-	for i := 2; i < len(s); i++ {
+	for i := 1 + size; i < len(s); {
 		if s[i] == '$' {
 			return s[:i+1], true
 		}
-		if !isIdentPart(rune(s[i])) {
+		nr, nsize := utf8.DecodeRuneInString(s[i:])
+		if !isPGDollarTagPart(nr, nsize) {
 			return "", false
 		}
+		i += nsize
 	}
 	return "", false
 }
 
+// PostgreSQL scan.l: dolq_start = [A-Za-z\200-\377_], dolq_cont = [A-Za-z\200-\377_0-9].
+func isPGDollarTagStart(r rune, size int) bool {
+	if r == utf8.RuneError && size == 1 {
+		return false
+	}
+	return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r >= 0x80
+}
+
+func isPGDollarTagPart(r rune, size int) bool {
+	if r == utf8.RuneError && size == 1 {
+		return false
+	}
+	return isPGDollarTagStart(r, size) || (r >= '0' && r <= '9')
+}
+
 func isIdentStart(r rune) bool { return r == '_' || unicode.IsLetter(r) }
 func isIdentPart(r rune) bool  { return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) }
+
+func isDialectIdentStart(dialect Dialect, r rune, size int) bool {
+	if dialect == DialectPostgres {
+		return isPGDollarTagStart(r, size)
+	}
+	return isIdentStart(r)
+}
+
+func isDialectIdentPart(dialect Dialect, r rune, size int) bool {
+	if dialect == DialectPostgres {
+		return isPGDollarTagPart(r, size)
+	}
+	return isIdentPart(r)
+}
 
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
@@ -1103,19 +1285,22 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 	b.Grow(len(s))
 	n := len(s)
 	inExecComment := false
+	prevWasIdent := false
 	for i := 0; i < n; {
 		ch := s[i]
 		if inExecComment && ch == '*' && i+1 < n && s[i+1] == '/' {
 			inExecComment = false
 			i += 2
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
-		if ch == '-' && i+1 < n && s[i+1] == '-' {
+		if ch == '-' && i+1 < n && s[i+1] == '-' && (i+2 == n || s[i+2] == ' ' || s[i+2] == '\t' || s[i+2] == '\r' || s[i+2] == '\n' || s[i+2] == '\f' || s[i+2] == '\v' || dialect != DialectMySQL) {
 			for i < n && s[i] != '\n' {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
 		if dialect == DialectMySQL && ch == '#' {
@@ -1123,6 +1308,7 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
 		if ch == '/' && i+1 < n && s[i+1] == '*' {
@@ -1131,6 +1317,7 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 					inExecComment = true
 					i += prefixLen
 					b.WriteByte(' ')
+					prevWasIdent = false
 					continue
 				}
 			}
@@ -1150,17 +1337,17 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				i++
 			}
 			b.WriteByte(' ')
+			prevWasIdent = false
 			continue
 		}
-		if ch == '\'' {
+		// Preserve backtick-quoted identifiers verbatim (MySQL / SQLite) so comment markers
+		// such as '--' or '#' inside quoted labels/identifiers are never stripped as comments.
+		if ch == '`' && dialect != DialectPostgres {
+			start := i
 			i++
 			for i < n {
-				if dialect == DialectMySQL && s[i] == '\\' && i+1 < n {
-					i += 2
-					continue
-				}
-				if s[i] == '\'' {
-					if i+1 < n && s[i+1] == '\'' {
+				if s[i] == '`' {
+					if i+1 < n && s[i+1] == '`' {
 						i += 2
 						continue
 					}
@@ -1169,11 +1356,142 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 				}
 				i++
 			}
-			b.WriteByte(' ')
+			b.WriteString(s[start:i])
+			prevWasIdent = true
 			continue
 		}
-		b.WriteByte(ch)
-		i++
+		if next, _, ok := scanSingleQuotedString(s, i, dialect, prevWasIdent); ok {
+			i = next
+			b.WriteByte(' ')
+			prevWasIdent = false
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		b.WriteString(s[i : i+size])
+		prevWasIdent = isDialectIdentPart(dialect, r, size) || r == '$'
+		i += size
 	}
 	return b.String()
+}
+
+// scanSingleQuotedString scans a single-quoted string literal starting at s[start], including
+// PostgreSQL E'...' / e'...' escape string literals and PostgreSQL multiline continuations
+// (where subsequent '...' segments separated by whitespace / '--' comments containing at least
+// one newline inherit the initial escape-string mode).
+// Returns the byte offset after the closing quote, the count of '\n' bytes consumed, and ok=true.
+func scanSingleQuotedString(s string, start int, dialect Dialect, prevWasIdent bool) (next int, newlines int, ok bool) {
+	n := len(s)
+	if start >= n {
+		return start, 0, false
+	}
+	ch := s[start]
+	isPGEscape := dialect == DialectPostgres && !prevWasIdent && (ch == 'E' || ch == 'e') && start+1 < n && s[start+1] == '\''
+	if ch != '\'' && !isPGEscape {
+		return start, 0, false
+	}
+
+	i := start + 1
+	if isPGEscape {
+		i = start + 2
+	}
+	allowBackslashEscape := dialect == DialectMySQL || isPGEscape
+
+	for {
+		closed := false
+		for i < n {
+			if s[i] == '\n' {
+				newlines++
+			}
+			if allowBackslashEscape && s[i] == '\\' && i+1 < n {
+				if s[i+1] == '\n' {
+					newlines++
+				}
+				i += 2
+				continue
+			}
+			if s[i] == '\'' {
+				if i+1 < n && s[i+1] == '\'' {
+					i += 2
+					continue
+				}
+				i++
+				closed = true
+				break
+			}
+			i++
+		}
+		if !closed || dialect != DialectPostgres {
+			return i, newlines, true
+		}
+
+		// PostgreSQL continues a string constant across lines when separated by whitespace and/or
+		// '--' comments containing at least one newline ('\n' or '\r'). The continuation segment
+		// inherits allowBackslashEscape from the opening E'...' / '...' segment.
+		j := i
+		sepNewlines := 0
+		sawNewline := false
+		for j < n {
+			switch s[j] {
+			case '\n':
+				sawNewline = true
+				sepNewlines++
+				j++
+			case '\r':
+				sawNewline = true
+				j++
+			case ' ', '\t', '\f', '\v':
+				j++
+			case '-':
+				if j+1 < n && s[j+1] == '-' {
+					j += 2
+					for j < n && s[j] != '\n' && s[j] != '\r' {
+						j++
+					}
+					continue
+				}
+				goto noContinuation
+			default:
+				goto noContinuation
+			}
+		}
+	noContinuation:
+		if sawNewline && j < n && s[j] == '\'' {
+			newlines += sepNewlines
+			i = j + 1
+			continue
+		}
+		return i, newlines, true
+	}
+}
+
+// scanMySQLAtVar scans an unquoted MySQL/MariaDB user or system variable token starting at '@'
+// (e.g. @do, @a.do, @@session.var). Quoted forms (@'...', @"...", @`...`) are not matched here
+// because their following quote is already scanned as a literal or quoted identifier token.
+func scanMySQLAtVar(s string, start int) (next int, isSysVar bool, ok bool) {
+	n := len(s)
+	if start >= n || s[start] != '@' {
+		return start, false, false
+	}
+	j := start + 1
+	if j < n && s[j] == '@' {
+		isSysVar = true
+		j++
+	}
+	if j >= n {
+		return start, false, false
+	}
+	r, size := utf8.DecodeRuneInString(s[j:])
+	if !(isIdentStart(r) || (r >= '0' && r <= '9') || r == '$' || r == '.') {
+		return start, false, false
+	}
+	j += size
+	for j < n {
+		nr, nsize := utf8.DecodeRuneInString(s[j:])
+		if isIdentPart(nr) || nr == '$' || nr == '.' {
+			j += nsize
+			continue
+		}
+		break
+	}
+	return j, isSysVar, true
 }

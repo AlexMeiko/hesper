@@ -1,6 +1,9 @@
 package sqlsplit
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSplitMySQLDelimiterAndStrings(t *testing.T) {
 	src := `
@@ -181,4 +184,1073 @@ func TestClassifyParenthesizedExplainMariaAnalyzeAndWithForUpdate(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestSplitSQLiteTriggersAndBracketIdentifiers(t *testing.T) {
+	t.Run("trigger followed by SELECT 1 with cursor assertions", func(t *testing.T) {
+		src := `CREATE TRIGGER trg_audit
+AFTER INSERT ON customers
+BEGIN
+  INSERT INTO audit_log(customer_id) VALUES (new.id);
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`
+		stmts := Split(src, DialectSQLite)
+		if len(stmts) != 2 {
+			t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL || !stmts[0].MutatesData {
+			t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT 1" || stmts[1].Kind != KindQuery || stmts[1].SplitError != "" {
+			t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+		}
+
+		// Cursor on inner INSERT, inner UPDATE, and END MUST all select the full trigger definition.
+		for _, needle := range []string{"INSERT INTO audit_log", "UPDATE stats SET", "END;"} {
+			pos := indexOfMust(t, src, needle)
+			picked, ok := SelectStatementAtCursor(stmts, pos)
+			if !ok || picked.Text != stmts[0].Text {
+				t.Fatalf("cursor on %q selected %q, want full trigger %q", needle, picked.Text, stmts[0].Text)
+			}
+		}
+
+		// Cursor after END; on SELECT 1 MUST select SELECT 1 alone.
+		selPos := indexOfMust(t, src, "SELECT 1")
+		picked, ok := SelectStatementAtCursor(stmts, selPos)
+		if !ok || picked.Text != "SELECT 1" {
+			t.Fatalf("cursor on SELECT 1 selected %q, want SELECT 1", picked.Text)
+		}
+	})
+
+	t.Run("CASE END inside trigger, comments around END, bracket idents, and EOF without trailing semi", func(t *testing.T) {
+		src := `CREATE TEMP TRIGGER [trg;1]
+AFTER UPDATE ON [my;tbl]
+WHEN (CASE WHEN new.[end] > 0 THEN 1 ELSE 0 END) = 1
+BEGIN
+  UPDATE [my;tbl] SET [end] = CASE WHEN old.[end] = 1 THEN 2 ELSE 3 END;
+  -- comment between ';' and END
+  /* block comment */ END`
+		stmts := Split(src, DialectSQLite)
+		if len(stmts) != 1 {
+			t.Fatalf("got %d statements, want 1: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("expected valid complete trigger at EOF without trailing ';', got %+v", stmts[0])
+		}
+
+		// Bracket-quoted [where] must NOT satisfy DELETE WHERE check.
+		delStmts := Split("DELETE FROM [where]; SELECT [a;b] FROM [t];", DialectSQLite)
+		if len(delStmts) != 2 {
+			t.Fatalf("expected 2 statements with bracket idents, got %d: %+v", len(delStmts), delStmts)
+		}
+		risks := DetectHighRisk(delStmts[0], DialectSQLite)
+		if len(risks) != 1 || risks[0].Kind != "delete_no_where" {
+			t.Fatalf("expected delete_no_where for DELETE FROM [where], got %+v", risks)
+		}
+	})
+
+	t.Run("missing closing END fails closed and never isolates inner UPDATE", func(t *testing.T) {
+		src := `CREATE TRIGGER trg_audit
+AFTER INSERT ON customers
+BEGIN
+  INSERT INTO audit_log(customer_id) VALUES (new.id);
+  UPDATE stats SET n = n + 1;
+`
+		stmts := Split(src, DialectSQLite)
+		if len(stmts) != 1 {
+			t.Fatalf("unclosed trigger MUST stay 1 statement, got %d: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError == "" {
+			t.Fatalf("expected non-empty SplitError for unclosed SQLite trigger, got %+v", stmts[0])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats")
+		picked, ok := SelectStatementAtCursor(stmts, updPos)
+		if !ok || picked.SplitError == "" {
+			t.Fatalf("cursor on inner UPDATE of unclosed trigger MUST carry SplitError, got ok=%v st=%+v", ok, picked)
+		}
+	})
+
+	t.Run("plain SQLite transaction BEGIN ... END still splits cleanly", func(t *testing.T) {
+		src := "BEGIN IMMEDIATE; INSERT INTO t VALUES (1); END TRANSACTION; SELECT 1;"
+		stmts := Split(src, DialectSQLite)
+		if len(stmts) != 4 {
+			t.Fatalf("expected 4 statements, got %d: %+v", len(stmts), stmts)
+		}
+		if stmts[0].Kind != KindBegin || stmts[1].Kind != KindWrite || stmts[2].Kind != KindCommit || stmts[3].Kind != KindQuery {
+			t.Fatalf("unexpected kinds: %+v", stmts)
+		}
+	})
+}
+
+func TestSplitMySQLCompoundStatementsAndBeginNotAtomic(t *testing.T) {
+	t.Run("procedure without DELIMITER followed by SELECT 1 with cursor assertions", func(t *testing.T) {
+		src := `CREATE DEFINER='root'@'localhost' PROCEDURE p_audit(IN x INT)
+DETERMINISTIC
+outer_lbl: BEGIN
+  DECLARE v INT DEFAULT 0;
+  SET v = CASE WHEN x > 0 THEN 1 ELSE 0 END;
+  IF v = 1 THEN
+    INSERT INTO audit_log VALUES (x);
+  END IF;
+  FOR i IN 1..2 DO
+    UPDATE stats SET n = n + i WHERE id = 1;
+  END FOR;
+  inner_lbl: BEGIN
+    SELECT IF(v = 1, 'a', 'b');
+  END inner_lbl;
+END outer_lbl;
+SELECT 1;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 2 {
+			t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT 1" || stmts[1].SplitError != "" {
+			t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+		}
+
+		for _, needle := range []string{"INSERT INTO audit_log", "UPDATE stats SET", "END FOR;", "END outer_lbl;"} {
+			pos := indexOfMust(t, src, needle)
+			picked, ok := SelectStatementAtCursor(stmts, pos)
+			if !ok || picked.Text != stmts[0].Text {
+				t.Fatalf("cursor on %q selected %q, want full procedure", needle, picked.Text)
+			}
+		}
+		selPos := indexOfMust(t, src, "SELECT 1")
+		if picked, ok := SelectStatementAtCursor(stmts, selPos); !ok || picked.Text != "SELECT 1" {
+			t.Fatalf("cursor on SELECT 1 selected %q", picked.Text)
+		}
+	})
+
+	t.Run("trigger, function, and event without DELIMITER", func(t *testing.T) {
+		src := `CREATE TRIGGER trg_u AFTER INSERT ON t FOR EACH ROW FOLLOWS trg_prev
+BEGIN
+  INSERT INTO log VALUES (NEW.id);
+  UPDATE stats SET n = n + 1;
+END;
+CREATE FUNCTION fn_c(x INT) RETURNS VARCHAR(32) CHARSET utf8mb4 DETERMINISTIC
+BEGIN
+  CASE x WHEN 1 THEN RETURN 'one'; ELSE RETURN 'other'; END CASE;
+END;
+CREATE EVENT ev_clean ON SCHEDULE EVERY 1 DAY COMMENT 'do cleanup' DO
+BEGIN
+  DELETE FROM tmp WHERE expired = 1;
+END;
+CREATE TRIGGER trg_simple AFTER INSERT ON t FOR EACH ROW INSERT INTO log VALUES (NEW.id);
+SELECT 1;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 5 {
+			t.Fatalf("got %d statements, want 5: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 4; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[4].Text != "SELECT 1" || stmts[4].SplitError != "" {
+			t.Fatalf("stmt[4] unexpected: %+v", stmts[4])
+		}
+	})
+
+	t.Run("compound body without outer BEGIN advises DELIMITER and never splits inner statements", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			src  string
+		}{
+			{
+				name: "direct_if_body",
+				src: `CREATE PROCEDURE p_if(IN x INT)
+IF x > 0 THEN
+  INSERT INTO audit_log VALUES (x);
+  UPDATE stats SET n = n + 1;
+END IF;`,
+			},
+			{
+				name: "direct_labeled_for_body",
+				src: `CREATE PROCEDURE p_for()
+lp: FOR i IN 1..3 DO
+  INSERT INTO audit_log VALUES (i);
+  UPDATE stats SET n = n + 1;
+END FOR lp;`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				stmts := Split(tc.src, DialectMySQL)
+				if len(stmts) != 1 || stmts[0].SplitError == "" {
+					t.Fatalf("expected 1 statement with DELIMITER guidance SplitError, got %+v", stmts)
+				}
+				updPos := indexOfMust(t, tc.src, "UPDATE stats")
+				picked, ok := SelectStatementAtCursor(stmts, updPos)
+				if !ok || picked.SplitError == "" {
+					t.Fatalf("cursor on inner UPDATE MUST carry SplitError, got %+v", picked)
+				}
+			})
+		}
+
+		// With explicit DELIMITER, direct IF body works cleanly.
+		withDelim := "DELIMITER //\nCREATE PROCEDURE p_if(IN x INT) IF x > 0 THEN INSERT INTO a VALUES (1); END IF //\nDELIMITER ;\nSELECT 1;"
+		stmts := Split(withDelim, DialectMySQL)
+		if len(stmts) != 2 || stmts[0].SplitError != "" || stmts[1].Text != "SELECT 1" {
+			t.Fatalf("explicit DELIMITER must take priority, got %+v", stmts)
+		}
+	})
+
+	t.Run("missing closing END fails closed", func(t *testing.T) {
+		src := `CREATE PROCEDURE p_unclosed()
+BEGIN
+  INSERT INTO a VALUES (1);
+  UPDATE stats SET n = n + 1;
+`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 1 || stmts[0].SplitError == "" {
+			t.Fatalf("expected 1 statement with SplitError for unclosed MySQL procedure, got %+v", stmts)
+		}
+	})
+
+	t.Run("MariaDB BEGIN NOT ATOMIC rejected explicitly and never classified as KindBegin", func(t *testing.T) {
+		src := `BEGIN NOT ATOMIC
+  INSERT INTO a VALUES (1);
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 2 {
+			t.Fatalf("expected 2 statements (unsupported block + SELECT 1), got %d: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError == "" || stmts[0].Kind == KindBegin || !stmts[0].MutatesData {
+			t.Fatalf("BEGIN NOT ATOMIC MUST have SplitError, Kind!=KindBegin, MutatesData=true, got %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT 1" || stmts[1].SplitError != "" {
+			t.Fatalf("trailing SELECT 1 unexpected: %+v", stmts[1])
+		}
+
+		// Even with DELIMITER //, BEGIN NOT ATOMIC is still explicitly rejected.
+		delimSrc := "DELIMITER //\nmy_lbl: BEGIN NOT ATOMIC INSERT INTO a VALUES (1); END //\nDELIMITER ;"
+		delimStmts := Split(delimSrc, DialectMySQL)
+		if len(delimStmts) != 1 || delimStmts[0].SplitError == "" || delimStmts[0].Kind == KindBegin {
+			t.Fatalf("labeled BEGIN NOT ATOMIC under DELIMITER MUST still carry SplitError, got %+v", delimStmts)
+		}
+
+		// Plain transaction BEGIN; ...; COMMIT; still works as 3 normal statements.
+		txStmts := Split("BEGIN; INSERT INTO a VALUES (1); COMMIT;", DialectMySQL)
+		if len(txStmts) != 3 || txStmts[0].Kind != KindBegin || txStmts[0].SplitError != "" {
+			t.Fatalf("plain MySQL transaction BEGIN broken: %+v", txStmts)
+		}
+	})
+}
+
+func TestSplitPostgresBeginAtomic(t *testing.T) {
+	src := `CREATE OR REPLACE FUNCTION add_audit(v INT) RETURNS INT
+LANGUAGE SQL
+BEGIN ATOMIC
+  INSERT INTO audit_log VALUES (v);
+  SELECT CASE WHEN v > 0 THEN v ELSE 0 END;
+END;
+SELECT 1;`
+	stmts := Split(src, DialectPostgres)
+	if len(stmts) != 2 {
+		t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+	}
+	if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+		t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+	}
+	if stmts[1].Text != "SELECT 1" || stmts[1].SplitError != "" {
+		t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+	}
+	insPos := indexOfMust(t, src, "INSERT INTO audit_log")
+	if picked, ok := SelectStatementAtCursor(stmts, insPos); !ok || picked.Text != stmts[0].Text {
+		t.Fatalf("cursor inside BEGIN ATOMIC selected %q, want full function", picked.Text)
+	}
+	selPos := indexOfMust(t, src, "SELECT 1")
+	if picked, ok := SelectStatementAtCursor(stmts, selPos); !ok || picked.Text != "SELECT 1" {
+		t.Fatalf("cursor on SELECT 1 selected %q", picked.Text)
+	}
+
+	// Missing closing END fails closed.
+	unclosed := `CREATE PROCEDURE p_atomic(v INT) LANGUAGE SQL BEGIN ATOMIC
+  INSERT INTO a VALUES (v);
+  UPDATE stats SET n = n + 1;`
+	unclosedStmts := Split(unclosed, DialectPostgres)
+	if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+		t.Fatalf("expected 1 statement with SplitError for unclosed PG BEGIN ATOMIC, got %+v", unclosedStmts)
+	}
+
+	// Ordinary BEGIN; SELECT 1; COMMIT; stays 3 statements.
+	tx := Split("BEGIN; SELECT 1; COMMIT;", DialectPostgres)
+	if len(tx) != 3 || tx[0].Kind != KindBegin || tx[1].Kind != KindQuery || tx[2].Kind != KindCommit {
+		t.Fatalf("plain PG tx split broken: %+v", tx)
+	}
+}
+
+func TestClassifyEndAndAndChainPerDialect(t *testing.T) {
+	cases := []struct {
+		name             string
+		sql              string
+		dialect          Dialect
+		wantKind         StatementKind
+		wantStartsNextTx bool
+	}{
+		// MySQL / MariaDB
+		{"mysql_end_is_other", "END", DialectMySQL, KindOther, false},
+		{"mysql_end_tx_is_other", "END TRANSACTION", DialectMySQL, KindOther, false},
+		{"mysql_commit", "COMMIT", DialectMySQL, KindCommit, false},
+		{"mysql_commit_and_chain", "COMMIT AND CHAIN", DialectMySQL, KindCommit, true},
+		{"mysql_commit_work_and_chain", "COMMIT WORK AND CHAIN", DialectMySQL, KindCommit, true},
+		{"mysql_commit_and_no_chain", "COMMIT AND NO CHAIN", DialectMySQL, KindCommit, false},
+		{"mysql_rollback_and_chain", "ROLLBACK AND CHAIN", DialectMySQL, KindRollback, true},
+		{"mysql_rollback_and_no_chain", "ROLLBACK AND NO CHAIN", DialectMySQL, KindRollback, false},
+
+		// SQLite
+		{"sqlite_end", "END", DialectSQLite, KindCommit, false},
+		{"sqlite_end_tx", "END TRANSACTION", DialectSQLite, KindCommit, false},
+		{"sqlite_end_tx_named", "END TRANSACTION my_tx", DialectSQLite, KindCommit, false},
+		{"sqlite_end_tx_quoted_name", "END TRANSACTION [my_tx]", DialectSQLite, KindCommit, false},
+		{"sqlite_end_work_not_commit", "END WORK", DialectSQLite, KindOther, false},
+		{"sqlite_end_if_not_commit", "END IF", DialectSQLite, KindOther, false},
+
+		// PostgreSQL
+		{"pg_end", "END", DialectPostgres, KindCommit, false},
+		{"pg_end_work", "END WORK", DialectPostgres, KindCommit, false},
+		{"pg_end_tx", "END TRANSACTION", DialectPostgres, KindCommit, false},
+		{"pg_end_and_chain", "END AND CHAIN", DialectPostgres, KindCommit, true},
+		{"pg_end_work_and_chain", "END WORK AND CHAIN", DialectPostgres, KindCommit, true},
+		{"pg_end_tx_and_chain", "END TRANSACTION AND CHAIN", DialectPostgres, KindCommit, true},
+		{"pg_end_and_no_chain", "END AND NO CHAIN", DialectPostgres, KindCommit, false},
+		{"pg_end_tx_and_no_chain", "END TRANSACTION AND NO CHAIN", DialectPostgres, KindCommit, false},
+		{"pg_end_if_not_commit", "END IF", DialectPostgres, KindOther, false},
+		{"pg_end_invalid_tail", "END FOOBAR", DialectPostgres, KindOther, false},
+		{"pg_commit_and_chain", "COMMIT AND CHAIN", DialectPostgres, KindCommit, true},
+		{"pg_commit_and_no_chain", "COMMIT AND NO CHAIN", DialectPostgres, KindCommit, false},
+		{"pg_rollback_and_chain", "ROLLBACK AND CHAIN", DialectPostgres, KindRollback, true},
+		{"pg_rollback_and_no_chain", "ROLLBACK AND NO CHAIN", DialectPostgres, KindRollback, false},
+		{"pg_rollback_to_savepoint", "ROLLBACK TO SAVEPOINT sp1", DialectPostgres, KindRollbackToSavepoint, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts := Split(tc.sql, tc.dialect)
+			if len(stmts) != 1 {
+				t.Fatalf("expected 1 statement for %q, got %d: %+v", tc.sql, len(stmts), stmts)
+			}
+			st := stmts[0]
+			if st.Kind != tc.wantKind || st.StartsNextTx != tc.wantStartsNextTx {
+				t.Fatalf("sql=%q (%s): got (kind=%s startsNextTx=%v), want (kind=%s startsNextTx=%v)",
+					tc.sql, tc.dialect, st.Kind, st.StartsNextTx, tc.wantKind, tc.wantStartsNextTx)
+			}
+		})
+	}
+}
+
+func TestSplitCompoundEdgeCasesAndEntryPoints(t *testing.T) {
+	t.Run("PostgreSQL BEGIN ATOMIC ignores alias and column named end", func(t *testing.T) {
+		src := `CREATE OR REPLACE FUNCTION f_alias_end() RETURNS INT
+LANGUAGE SQL
+BEGIN ATOMIC
+  SELECT 1 AS end;
+  UPDATE stats SET n = n + 1;
+  SELECT t.end FROM t;
+  SELECT CASE WHEN true THEN 1 ELSE 2 END;
+END;
+SELECT 2;`
+		stmts := Split(src, DialectPostgres)
+		if len(stmts) != 2 {
+			t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT 2" || stmts[1].SplitError != "" {
+			t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor on inner UPDATE after 'SELECT 1 AS end;' selected %q, want full function", picked.Text)
+		}
+
+		// Missing closing END after 'SELECT 1 AS end;' MUST still fail closed.
+		unclosed := `CREATE FUNCTION f_alias_end_unclosed() RETURNS INT LANGUAGE SQL
+BEGIN ATOMIC
+  SELECT 1 AS end;
+  UPDATE stats SET n = n + 1;`
+		unclosedStmts := Split(unclosed, DialectPostgres)
+		if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+			t.Fatalf("expected 1 statement with SplitError for unclosed PG BEGIN ATOMIC after alias end, got %+v", unclosedStmts)
+		}
+	})
+
+	t.Run("MySQL BEGIN block ignores qualified t.end/t.begin, aliases, and handles nested control flow", func(t *testing.T) {
+		src := `CREATE PROCEDURE p_end_ident()
+BEGIN
+  DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN
+    UPDATE stats SET n = n + 2;
+  END;
+  SELECT t.end, t.begin, 1 AS end, 2 AS begin FROM t;
+  SET @v = CASE WHEN 1 = 1 THEN t.begin ELSE t.end END;
+  IF CASE WHEN 1 = 1 THEN t.end ELSE 0 END = 1 THEN
+    WHILE @i < 3 DO
+      inner_lbl: BEGIN
+        UPDATE stats SET n = n + 1;
+      END inner_lbl;
+    END WHILE;
+  END IF;
+  UPDATE stats SET n = n + 3;
+END;
+SELECT 2;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 2 {
+			t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT 2" || stmts[1].SplitError != "" {
+			t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats SET n = n + 3")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor on inner UPDATE after t.end selected %q, want full procedure", picked.Text)
+		}
+
+		// Missing closing outer END after SELECT t.end MUST still fail closed.
+		unclosed := `CREATE PROCEDURE p_end_unclosed()
+BEGIN
+  SELECT t.end FROM t;
+  UPDATE stats SET n = n + 1;`
+		unclosedStmts := Split(unclosed, DialectMySQL)
+		if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+			t.Fatalf("expected 1 statement with SplitError for unclosed MySQL proc after t.end, got %+v", unclosedStmts)
+		}
+	})
+
+	t.Run("SQLite EXPLAIN and EXPLAIN QUERY PLAN CREATE TRIGGER stay atomic", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			src  string
+		}{
+			{
+				name: "explain_create_trigger",
+				src: `EXPLAIN CREATE TRIGGER trg_exp
+AFTER INSERT ON customers
+BEGIN
+  INSERT INTO audit_log(customer_id) VALUES (new.id);
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`,
+			},
+			{
+				name: "explain_query_plan_create_temp_trigger",
+				src: `EXPLAIN QUERY PLAN CREATE TEMP TRIGGER trg_eqp
+AFTER INSERT ON customers
+BEGIN
+  INSERT INTO audit_log(customer_id) VALUES (new.id);
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				stmts := Split(tc.src, DialectSQLite)
+				if len(stmts) != 2 {
+					t.Fatalf("got %d statements, want 2: %+v", len(stmts), stmts)
+				}
+				if stmts[0].SplitError != "" || stmts[0].Kind != KindQuery || !stmts[0].ReturnsRows {
+					t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+				}
+				if stmts[1].Text != "SELECT 1" || stmts[1].SplitError != "" {
+					t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+				}
+				updPos := indexOfMust(t, tc.src, "UPDATE stats")
+				if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+					t.Fatalf("cursor on inner UPDATE inside EXPLAIN CREATE TRIGGER selected %q", picked.Text)
+				}
+			})
+		}
+
+		unclosed := `EXPLAIN CREATE TRIGGER trg_exp_unclosed
+AFTER INSERT ON customers
+BEGIN
+  UPDATE stats SET n = n + 1;`
+		unclosedStmts := Split(unclosed, DialectSQLite)
+		if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+			t.Fatalf("expected 1 statement with SplitError for unclosed EXPLAIN CREATE TRIGGER, got %+v", unclosedStmts)
+		}
+	})
+
+	t.Run("MySQL executable comments in CREATE DEFINER and ambiguous multi-statement executable comments", func(t *testing.T) {
+		src := `CREATE /*!50020 DEFINER='root'@'localhost'*/ PROCEDURE p_exec_comment()
+BEGIN
+  INSERT INTO audit_log VALUES (1);
+  UPDATE stats SET n = n + 1;
+END;
+CREATE /*M!100301 DEFINER=CURRENT_USER()*/ TRIGGER trg_exec_comment
+AFTER INSERT ON customers FOR EACH ROW
+BEGIN
+  INSERT INTO audit_log VALUES (NEW.id);
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 3 {
+			t.Fatalf("got %d statements, want 3: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmt[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].SplitError != "" || stmts[1].Kind != KindDDL {
+			t.Fatalf("stmt[1] unexpected: %+v", stmts[1])
+		}
+		if stmts[2].Text != "SELECT 1" || stmts[2].SplitError != "" {
+			t.Fatalf("stmt[2] unexpected: %+v", stmts[2])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor on inner UPDATE inside CREATE /*!50020 DEFINER=...*/ PROCEDURE selected %q", picked.Text)
+		}
+
+		// Ambiguous multi-statement executable comments MUST fail closed with DELIMITER guidance.
+		for _, bad := range []string{
+			`/*!50000 SELECT 1; SELECT 2 */`,
+			`/*!50000 SELECT 1; */ SELECT 2;`,
+		} {
+			badStmts := Split(bad, DialectMySQL)
+			if len(badStmts) != 1 || badStmts[0].SplitError == "" {
+				t.Fatalf("expected SplitError for ambiguous executable comment %q, got %+v", bad, badStmts)
+			}
+		}
+
+		// Single-statement executable comment with trailing ';' followed by outer ';' stays valid.
+		okStmts := Split(`/*!50000 SELECT 1; */; SELECT 2;`, DialectMySQL)
+		if len(okStmts) != 2 || okStmts[0].SplitError != "" || okStmts[1].Text != "SELECT 2" || okStmts[1].SplitError != "" {
+			t.Fatalf("expected clean 2 statements for single-statement executable comment, got %+v", okStmts)
+		}
+	})
+
+	t.Run("MariaDB standalone anonymous blocks fail closed without splitting", func(t *testing.T) {
+		cases := []struct {
+			name string
+			src  string
+		}{
+			{
+				name: "standalone_if",
+				src: `IF 1 = 1 THEN
+  INSERT INTO a VALUES (1);
+  UPDATE stats SET n = n + 1;
+END IF;`,
+			},
+			{
+				name: "standalone_if_no_space_paren",
+				src: `IF(1 = 1) THEN
+  UPDATE stats SET n = n + 1;
+END IF;`,
+			},
+			{
+				name: "standalone_while",
+				src: `WHILE @i < 3 DO
+  SET @i = @i + 1;
+  UPDATE stats SET n = n + 1;
+END WHILE;`,
+			},
+			{
+				name: "standalone_for",
+				src: `FOR i IN 1..3 DO
+  UPDATE stats SET n = n + 1;
+END FOR;`,
+			},
+			{
+				name: "standalone_repeat",
+				src: `REPEAT
+  UPDATE stats SET n = n + 1;
+UNTIL 1 = 1
+END REPEAT;`,
+			},
+			{
+				name: "labeled_loop",
+				src: `lp: LOOP
+  UPDATE stats SET n = n + 1;
+  LEAVE lp;
+END LOOP lp;`,
+			},
+			{
+				name: "standalone_case",
+				src: `CASE @x
+  WHEN 1 THEN UPDATE stats SET n = n + 1;
+  ELSE UPDATE stats SET n = n + 2;
+END CASE;`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				stmts := Split(tc.src, DialectMySQL)
+				if len(stmts) != 1 {
+					t.Fatalf("expected 1 unsplit statement for %s, got %d: %+v", tc.name, len(stmts), stmts)
+				}
+				st := stmts[0]
+				if st.SplitError == "" || st.Kind != KindOther || !st.MutatesData {
+					t.Fatalf("expected SplitError + KindOther + MutatesData=true for %s, got %+v", tc.name, st)
+				}
+				updPos := indexOfMust(t, tc.src, "UPDATE stats")
+				picked, ok := SelectStatementAtCursor(stmts, updPos)
+				if !ok || picked.SplitError == "" {
+					t.Fatalf("cursor on inner UPDATE inside %s MUST carry SplitError, got %+v", tc.name, picked)
+				}
+
+				// Direct Classify must agree (KindOther + mutates=true).
+				ck, _, cm := Classify(tc.src, DialectMySQL)
+				if ck != KindOther || !cm {
+					t.Fatalf("Classify(%s) = (%s, mutates=%v), want (KindOther, true)", tc.name, ck, cm)
+				}
+
+				// Custom DELIMITER must still reject MariaDB anonymous blocks cleanly.
+				delimSrc := "DELIMITER //\n" + strings.TrimSuffix(tc.src, ";") + " //\nDELIMITER ;"
+				delimStmts := Split(delimSrc, DialectMySQL)
+				if len(delimStmts) != 1 || delimStmts[0].SplitError == "" || delimStmts[0].Kind != KindOther || !delimStmts[0].MutatesData {
+					t.Fatalf("expected SplitError under custom DELIMITER for %s, got %+v", tc.name, delimStmts)
+				}
+			})
+		}
+	})
+
+	t.Run("MySQL ALTER EVENT with DO compound block stays atomic", func(t *testing.T) {
+		src := `ALTER EVENT ev_demo DO
+BEGIN
+  SELECT 1;
+  UPDATE stats SET n = n + 1;
+END;
+ALTER /*!50020 DEFINER='root'@'localhost'*/ EVENT ev_def
+ON SCHEDULE EVERY 1 HOUR DISABLE
+DO BEGIN
+  INSERT INTO audit_log VALUES (1);
+  UPDATE stats SET n = n + 2;
+END;
+ALTER DEFINER=user@localhost EVENT app.do DO
+BEGIN
+  SELECT 1;
+  UPDATE stats SET n = n + 3;
+END;
+ALTER DEFINER=event@127.0.0.1 EVENT do RENAME TO app.do DO
+BEGIN
+  SELECT 1;
+  UPDATE stats SET n = n + 4;
+END;
+CREATE DEFINER=user@localhost EVENT IF NOT EXISTS app.do
+ON SCHEDULE EVERY 1 DAY DISABLE
+DO BEGIN
+  SELECT 1;
+  UPDATE stats SET n = n + 5;
+END;
+ALTER EVENT ev_toggle ENABLE;
+SELECT 3;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 7 {
+			t.Fatalf("got %d statements, want 7: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 6; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[6].Text != "SELECT 3" || stmts[6].SplitError != "" {
+			t.Fatalf("stmt[6] unexpected: %+v", stmts[6])
+		}
+		for idx, needle := range []string{
+			"UPDATE stats SET n = n + 1;",
+			"UPDATE stats SET n = n + 2;",
+			"UPDATE stats SET n = n + 3;",
+			"UPDATE stats SET n = n + 4;",
+			"UPDATE stats SET n = n + 5;",
+		} {
+			pos := indexOfMust(t, src, needle)
+			if picked, ok := SelectStatementAtCursor(stmts, pos); !ok || picked.Text != stmts[idx].Text {
+				t.Fatalf("cursor on %q selected %q, want stmt[%d]", needle, picked.Text, idx)
+			}
+		}
+
+		// Non-BEGIN compound body inside ALTER EVENT advises DELIMITER instead of splitting.
+		ifBody := `ALTER EVENT ev_if DO IF 1 = 1 THEN UPDATE stats SET n = n + 1; END IF;`
+		ifStmts := Split(ifBody, DialectMySQL)
+		if len(ifStmts) != 1 || ifStmts[0].SplitError == "" {
+			t.Fatalf("expected SplitError advising DELIMITER for ALTER EVENT ... DO IF, got %+v", ifStmts)
+		}
+
+		// Missing closing END inside ALTER EVENT fails closed.
+		unclosed := `ALTER DEFINER=user@localhost EVENT app.do DO BEGIN UPDATE stats SET n = n + 1;`
+		unclosedStmts := Split(unclosed, DialectMySQL)
+		if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+			t.Fatalf("expected SplitError for unclosed ALTER EVENT, got %+v", unclosedStmts)
+		}
+	})
+
+	t.Run("MySQL outermost backtick-quoted block labels on routines stay atomic", func(t *testing.T) {
+		src := "CREATE PROCEDURE p_bt_lbl()\n" +
+			"`blk`: BEGIN\n" +
+			"  SELECT 1;\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END `blk`;\n" +
+			"CREATE PROCEDURE p_bt_comment() COMMENT 'desc'\n" +
+			"`blk2`: BEGIN\n" +
+			"  INSERT INTO a VALUES (1);\n" +
+			"  UPDATE stats SET n = n + 2;\n" +
+			"END `blk2`;\n" +
+			"CREATE FUNCTION f_bt_lbl() RETURNS INT DETERMINISTIC\n" +
+			"`fblk`: BEGIN\n" +
+			"  UPDATE stats SET n = n + 3;\n" +
+			"  RETURN 1;\n" +
+			"END `fblk`;\n" +
+			"SELECT 2;"
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 4 {
+			t.Fatalf("got %d statements, want 4: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 3; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[3].Text != "SELECT 2" || stmts[3].SplitError != "" {
+			t.Fatalf("stmt[3] unexpected: %+v", stmts[3])
+		}
+		for idx, needle := range []string{
+			"UPDATE stats SET n = n + 1;",
+			"UPDATE stats SET n = n + 2;",
+			"UPDATE stats SET n = n + 3;",
+		} {
+			pos := indexOfMust(t, src, needle)
+			if picked, ok := SelectStatementAtCursor(stmts, pos); !ok || picked.Text != stmts[idx].Text {
+				t.Fatalf("cursor on %q selected %q, want stmt[%d]", needle, picked.Text, idx)
+			}
+		}
+
+		// Backtick-labeled non-BEGIN compound body advises DELIMITER instead of splitting.
+		ifLabeled := "CREATE PROCEDURE p_bt_if() `blk`: IF 1 = 1 THEN UPDATE stats SET n = n + 1; END IF `blk`;"
+		ifStmts := Split(ifLabeled, DialectMySQL)
+		if len(ifStmts) != 1 || ifStmts[0].SplitError == "" {
+			t.Fatalf("expected SplitError advising DELIMITER for backtick-labeled IF body, got %+v", ifStmts)
+		}
+
+		// Unclosed backtick-labeled BEGIN fails closed.
+		unclosed := "CREATE PROCEDURE p_bt_unclosed() `blk`: BEGIN UPDATE stats SET n = n + 1;"
+		unclosedStmts := Split(unclosed, DialectMySQL)
+		if len(unclosedStmts) != 1 || unclosedStmts[0].SplitError == "" {
+			t.Fatalf("expected SplitError for unclosed backtick-labeled BEGIN, got %+v", unclosedStmts)
+		}
+	})
+
+	t.Run("MariaDB AGGREGATE FUNCTION and nested BEGIN NOT ATOMIC stay atomic", func(t *testing.T) {
+		src := `CREATE AGGREGATE FUNCTION agg_sum(x INT) RETURNS INT
+BEGIN
+  DECLARE s INT DEFAULT 0;
+  DECLARE CONTINUE HANDLER FOR NOT FOUND RETURN s;
+  LOOP
+    FETCH GROUP NEXT ROW;
+    SET s = s + x;
+  END LOOP;
+END;
+CREATE OR REPLACE DEFINER=user@localhost AGGREGATE FUNCTION agg_cnt(x INT) RETURNS INT
+BEGIN
+  RETURN 1;
+END;
+CREATE AGGREGATE FUNCTION native_udf RETURNS INTEGER SONAME 'my_udf.so';
+CREATE PROCEDURE p_nested_not_atomic()
+BEGIN
+  BEGIN NOT ATOMIC
+    BEGIN
+      INSERT INTO audit_log VALUES (1);
+    END;
+  END;
+  UPDATE stats SET n = n + 1;
+END;
+SELECT 1;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 5 {
+			t.Fatalf("got %d statements, want 5: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 4; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[4].Text != "SELECT 1" || stmts[4].SplitError != "" {
+			t.Fatalf("stmt[4] unexpected: %+v", stmts[4])
+		}
+		// Cursor inside AGGREGATE FUNCTION and after nested BEGIN NOT ATOMIC -> picks full routine!
+		loopPos := indexOfMust(t, src, "SET s = s + x;")
+		if picked, ok := SelectStatementAtCursor(stmts, loopPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor inside AGGREGATE FUNCTION selected %q", picked.Text)
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[3].Text {
+			t.Fatalf("cursor on UPDATE after nested BEGIN NOT ATOMIC selected %q", picked.Text)
+		}
+	})
+
+	t.Run("PostgreSQL E escape strings, SQLite form feed in trigger, and MySQL backtick -- labels", func(t *testing.T) {
+		// 1. PostgreSQL E'...' escape string containing escaped quote and '; END;' inside BEGIN ATOMIC.
+		pgSrc := `CREATE FUNCTION f_esc() RETURNS TEXT LANGUAGE SQL
+BEGIN ATOMIC
+  SELECT E'it\'s; END; still inside';
+  UPDATE stats SET n = n + 1;
+  SELECT e'ok\'';
+END;
+SELECT E'a\'; b';
+SELECT 2;`
+		pgStmts := Split(pgSrc, DialectPostgres)
+		if len(pgStmts) != 3 {
+			t.Fatalf("PG E'...' got %d statements, want 3: %+v", len(pgStmts), pgStmts)
+		}
+		if pgStmts[0].SplitError != "" || pgStmts[0].Kind != KindDDL {
+			t.Fatalf("pgStmts[0] unexpected: %+v", pgStmts[0])
+		}
+		if pgStmts[1].Text != `SELECT E'a\'; b'` || pgStmts[2].Text != "SELECT 2" {
+			t.Fatalf("pgStmts trailing unexpected: %+v", pgStmts[1:])
+		}
+		updPos := indexOfMust(t, pgSrc, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(pgStmts, updPos); !ok || picked.Text != pgStmts[0].Text {
+			t.Fatalf("cursor on UPDATE after PG E'...' selected %q", picked.Text)
+		}
+
+		// 2. SQLite form feed (\f) between ';' and END inside CREATE TRIGGER.
+		sqSrc := "CREATE TRIGGER trg_ff AFTER INSERT ON customers BEGIN INSERT INTO audit_log VALUES (new.id);\fEND;\nSELECT 1;"
+		sqStmts := Split(sqSrc, DialectSQLite)
+		if len(sqStmts) != 2 || sqStmts[0].SplitError != "" || sqStmts[1].Text != "SELECT 1" {
+			t.Fatalf("SQLite form feed before END broke trigger split: %+v", sqStmts)
+		}
+
+		// 3. Backtick-quoted MariaDB anonymous block label containing '--' and doubled backticks under custom DELIMITER.
+		btAnon := "DELIMITER //\n`a--b``c`: IF 1 = 1 THEN UPDATE stats SET n = n + 1; END IF //\nDELIMITER ;"
+		btStmts := Split(btAnon, DialectMySQL)
+		if len(btStmts) != 1 || btStmts[0].SplitError == "" || btStmts[0].Kind != KindOther || !btStmts[0].MutatesData {
+			t.Fatalf("backtick label with '--' under DELIMITER MUST still be rejected as MariaDB anon block, got %+v", btStmts)
+		}
+	})
+
+	t.Run("PostgreSQL multiline E escape string continuations", func(t *testing.T) {
+		// Continuation fragment separated by newline (with optional '--' comment) inherits E'...' backslash-escape mode.
+		src := "SELECT E'first line'\n-- continuation comment\n'second\\' ; still inside';\nSELECT 2;"
+		stmts := Split(src, DialectPostgres)
+		if len(stmts) != 2 {
+			t.Fatalf("PG multiline E'...' continuation got %d statements, want 2: %+v", len(stmts), stmts)
+		}
+		if stmts[0].Kind != KindQuery || stmts[1].Text != "SELECT 2" || stmts[1].StartLine != 4 {
+			t.Fatalf("PG multiline E'...' continuation unexpected statements: %+v", stmts)
+		}
+
+		// Multi-fragment continuation inside BEGIN ATOMIC + DetectHighRisk ignores keywords inside continued E'...' fragment.
+		atomicSrc := "CREATE FUNCTION f_cont() RETURNS TEXT LANGUAGE SQL\n" +
+			"BEGIN ATOMIC\n" +
+			"  SELECT E'head'\n" +
+			"  'mid\\' ; END; DROP TABLE users;'\n" +
+			"  'tail\\\\'' ; still string';\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END;\n" +
+			"SELECT 2;"
+		atomicStmts := Split(atomicSrc, DialectPostgres)
+		if len(atomicStmts) != 2 || atomicStmts[0].SplitError != "" || atomicStmts[1].Text != "SELECT 2" {
+			t.Fatalf("PG BEGIN ATOMIC multiline E'...' got %+v", atomicStmts)
+		}
+		updAtomicPos := indexOfMust(t, atomicSrc, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(atomicStmts, updAtomicPos); !ok || picked.Text != atomicStmts[0].Text {
+			t.Fatalf("cursor on UPDATE after multiline E'...' selected %q", picked.Text)
+		}
+		for _, m := range DetectHighRisk(atomicStmts[0], DialectPostgres) {
+			if m.Kind == "drop" {
+				t.Fatalf("DROP inside continued E'...' literal MUST NOT be flagged: %+v", m)
+			}
+		}
+		// Direct DetectHighRisk check on standalone SELECT with continued E'...' containing DROP TABLE.
+		selStmts := Split("SELECT E'a'\n'b\\' ; DROP TABLE users';\nSELECT 2;", DialectPostgres)
+		if len(selStmts) != 2 || selStmts[1].Text != "SELECT 2" {
+			t.Fatalf("standalone multiline E'...' split unexpected: %+v", selStmts)
+		}
+		if hr := DetectHighRisk(selStmts[0], DialectPostgres); len(hr) != 0 {
+			t.Fatalf("DROP inside continued E'...' literal MUST NOT trigger DetectHighRisk, got %+v", hr)
+		}
+		// stripCommentsAndStrings MUST also strip continued E'...' segment consistently.
+		if IsReadOnlyEscapeSet("SET application_name = E'x'\n'y\\' default_transaction_read_only = off'", DialectPostgres) {
+			t.Fatalf("continued E'...' literal MUST NOT trigger IsReadOnlyEscapeSet")
+		}
+		// Plain '...' multiline continuation MUST keep backslash literal (not escape-enabled).
+		plainSrc := "SELECT 'a'\n'b\\'; SELECT 2;"
+		plainStmts := Split(plainSrc, DialectPostgres)
+		if len(plainStmts) != 2 || plainStmts[1].Text != "SELECT 2" {
+			t.Fatalf("PG plain multiline string should NOT enable backslash escape, got %+v", plainStmts)
+		}
+	})
+
+	t.Run("MySQL event schedule @do user/system variables and DEFINER user@host compatibility", func(t *testing.T) {
+		src := `CREATE EVENT ev_at_do ON SCHEDULE AT @do DO BEGIN
+  SELECT 1;
+  UPDATE stats SET n = n + 1;
+END;
+ALTER DEFINER=user@do EVENT app.do ON SCHEDULE AT @a.do + INTERVAL 1 HOUR DO BEGIN
+  SELECT 2;
+  UPDATE stats SET n = n + 2;
+END;
+ALTER DEFINER=user@my-host.example.com EVENT ev_sys ON SCHEDULE AT @@session.do DO BEGIN
+  SELECT 3;
+  UPDATE stats SET n = n + 3;
+END;
+CREATE DEFINER=user@10.0.0.% EVENT ev_pct ON SCHEDULE AT @'do' DO BEGIN
+  SELECT 4;
+  UPDATE stats SET n = n + 4;
+END;
+SELECT 5;`
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 5 {
+			t.Fatalf("MySQL @do event schedule got %d statements, want 5: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 4; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[4].Text != "SELECT 5" {
+			t.Fatalf("stmt[4] unexpected: %+v", stmts[4])
+		}
+		for i, needle := range []string{
+			"UPDATE stats SET n = n + 1;",
+			"UPDATE stats SET n = n + 2;",
+			"UPDATE stats SET n = n + 3;",
+			"UPDATE stats SET n = n + 4;",
+		} {
+			pos := indexOfMust(t, src, needle)
+			if picked, ok := SelectStatementAtCursor(stmts, pos); !ok || picked.Text != stmts[i].Text {
+				t.Fatalf("cursor on %q selected %q, want full stmt[%d]", needle, picked.Text, i)
+			}
+		}
+		// High-risk detector must not mistake MySQL @where variable for a WHERE clause.
+		updStmts := Split("UPDATE stats SET n = @where;", DialectMySQL)
+		if len(updStmts) != 1 {
+			t.Fatalf("unexpected split: %+v", updStmts)
+		}
+		hr := DetectHighRisk(updStmts[0], DialectMySQL)
+		if len(hr) != 1 || hr[0].Kind != "update_no_where" {
+			t.Fatalf("UPDATE without WHERE using @where variable MUST still flag update_no_where, got %+v", hr)
+		}
+		// IsReadOnlyEscapeSet must still detect SET @@session.transaction_read_only = 0.
+		if !IsReadOnlyEscapeSet("SET @@session.transaction_read_only = 0", DialectMySQL) {
+			t.Fatalf("SET @@session.transaction_read_only = 0 MUST still be flagged as read-only escape")
+		}
+	})
+
+	t.Run("MariaDB outer routine body BEGIN NOT ATOMIC with immediate nested BEGIN stays atomic", func(t *testing.T) {
+		src := "CREATE PROCEDURE p_outer_bna()\n" +
+			"BEGIN NOT ATOMIC\n" +
+			"  BEGIN\n" +
+			"    SELECT 1;\n" +
+			"  END;\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END;\n" +
+			"CREATE PROCEDURE p_outer_bna_nested_bna() BEGIN NOT ATOMIC\n" +
+			"  BEGIN NOT ATOMIC\n" +
+			"    SELECT 2;\n" +
+			"  END;\n" +
+			"  UPDATE stats SET n = n + 2;\n" +
+			"END;\n" +
+			"CREATE PROCEDURE p_outer_bna_empty() BEGIN NOT ATOMIC END;\n" +
+			"SELECT 3;"
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 4 {
+			t.Fatalf("outer BEGIN NOT ATOMIC got %d statements, want 4: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 3; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[3].Text != "SELECT 3" || stmts[3].SplitError != "" {
+			t.Fatalf("stmt[3] unexpected: %+v", stmts[3])
+		}
+		for i, needle := range []string{
+			"UPDATE stats SET n = n + 1;",
+			"UPDATE stats SET n = n + 2;",
+		} {
+			pos := indexOfMust(t, src, needle)
+			if picked, ok := SelectStatementAtCursor(stmts, pos); !ok || picked.Text != stmts[i].Text {
+				t.Fatalf("cursor on %q selected %q, want full stmt[%d]", needle, picked.Text, i)
+			}
+		}
+	})
+
+	t.Run("PostgreSQL UTF-8 dollar tags stay intact inside BEGIN ATOMIC and tokenizer", func(t *testing.T) {
+		src := "CREATE FUNCTION f_utf8_tag() RETURNS TEXT LANGUAGE SQL\n" +
+			"BEGIN ATOMIC\n" +
+			"  SELECT $é$one; END; DROP TABLE users; two$é$;\n" +
+			"  SELECT $标签_1$three; END; four$标签_1$;\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END;\n" +
+			"SELECT foo$é$ FROM bar;\n" +
+			"SELECT $1 + $2;"
+		stmts := Split(src, DialectPostgres)
+		if len(stmts) != 3 {
+			t.Fatalf("PG UTF-8 dollar tags got %d statements, want 3: %+v", len(stmts), stmts)
+		}
+		if stmts[0].SplitError != "" || stmts[0].Kind != KindDDL {
+			t.Fatalf("stmts[0] unexpected: %+v", stmts[0])
+		}
+		if stmts[1].Text != "SELECT foo$é$ FROM bar" || stmts[2].Text != "SELECT $1 + $2" {
+			t.Fatalf("trailing statements unexpected: %+v", stmts[1:])
+		}
+		updPos := indexOfMust(t, src, "UPDATE stats SET n = n + 1;")
+		if picked, ok := SelectStatementAtCursor(stmts, updPos); !ok || picked.Text != stmts[0].Text {
+			t.Fatalf("cursor on UPDATE after UTF-8 dollar tag selected %q", picked.Text)
+		}
+		// Tokenizer must not leak keywords (DROP / END) from inside UTF-8 dollar-quoted or multiline E'...' literals.
+		for _, tok := range tokenizeSQL(stmts[0].Text, DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "DROP" {
+				t.Fatalf("tokenizer leaked DROP from inside UTF-8 dollar-quoted literal: %+v", tok)
+			}
+		}
+		for _, tok := range tokenizeSQL("SELECT E'a'\n'b\\' ; DROP TABLE users'", DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "DROP" {
+				t.Fatalf("tokenizer leaked DROP from inside continued E'...' literal: %+v", tok)
+			}
+		}
+		// Identifier containing '$' (foo$é$) must remain a single identifier token, not open a dollar quote.
+		var sawFooTag bool
+		for _, tok := range tokenizeSQL(stmts[1].Text, DialectPostgres) {
+			if tok.kind == tokWord && tok.upper == "FOO$É$" {
+				sawFooTag = true
+			}
+		}
+		if !sawFooTag {
+			t.Fatalf("expected identifier foo$é$ to remain intact in tokenizeSQL, got %+v", tokenizeSQL(stmts[1].Text, DialectPostgres))
+		}
+		// Combining mark (U+0301) and non-ASCII high-bit bytes inside PostgreSQL identifiers must be consumed
+		// as identifier characters so an internal $é$ is never mistaken for an unclosed dollar quote.
+		for _, tc := range []struct {
+			sql       string
+			wantIdent string
+		}{
+			{"SELECT 1 AS a\u0301$é$; SELECT 2;", "A\u0301$É$"},
+			{"SELECT 🚀$é$; SELECT 2;", "🚀$É$"},
+		} {
+			s := Split(tc.sql, DialectPostgres)
+			if len(s) != 2 || s[1].Text != "SELECT 2" {
+				t.Fatalf("PG high-bit identifier %q broke Split: %+v", tc.sql, s)
+			}
+			var found bool
+			for _, tok := range tokenizeSQL(s[0].Text, DialectPostgres) {
+				if tok.kind == tokWord && tok.upper == tc.wantIdent {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected intact identifier %q in tokenizeSQL(%q), got %+v", tc.wantIdent, s[0].Text, tokenizeSQL(s[0].Text, DialectPostgres))
+			}
+		}
+	})
+}
+
+func indexOfMust(t *testing.T, src, needle string) int {
+	t.Helper()
+	for i := 0; i+len(needle) <= len(src); i++ {
+		if src[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	t.Fatalf("substring %q not found in %q", needle, src)
+	return -1
 }

@@ -17,13 +17,16 @@ const (
 	ErrTxAborted           ErrorCode = "ERR_TX_ABORTED"
 	ErrReadOnlyDenied      ErrorCode = "ERR_READ_ONLY_DENIED"
 	ErrResultExpired       ErrorCode = "ERR_RESULT_EXPIRED"
-	ErrConcurrencyConflict ErrorCode = "ERR_CONCURRENCY_CONFLICT"
-	ErrRowNotIdentifiable  ErrorCode = "ERR_ROW_NOT_IDENTIFIABLE"
-	ErrBatchNonTx          ErrorCode = "ERR_BATCH_NON_TRANSACTIONAL"
-	ErrInvalidArgument     ErrorCode = "ERR_INVALID_ARGUMENT"
-	ErrNotFound            ErrorCode = "ERR_NOT_FOUND"
-	ErrUnsupported         ErrorCode = "ERR_UNSUPPORTED"
-	ErrInternal            ErrorCode = "ERR_INTERNAL"
+	ErrConcurrencyConflict  ErrorCode = "ERR_CONCURRENCY_CONFLICT"
+	ErrRowNotIdentifiable   ErrorCode = "ERR_ROW_NOT_IDENTIFIABLE"
+	ErrBatchNonTx           ErrorCode = "ERR_BATCH_NON_TRANSACTIONAL"
+	ErrSchemaChanged        ErrorCode = "ERR_SCHEMA_CHANGED"
+	ErrPlanInvalidated      ErrorCode = "ERR_PLAN_INVALIDATED"
+	ErrPrecisionUnsupported ErrorCode = "ERR_PRECISION_UNSUPPORTED"
+	ErrInvalidArgument      ErrorCode = "ERR_INVALID_ARGUMENT"
+	ErrNotFound             ErrorCode = "ERR_NOT_FOUND"
+	ErrUnsupported          ErrorCode = "ERR_UNSUPPORTED"
+	ErrInternal             ErrorCode = "ERR_INTERNAL"
 )
 
 // AppError is a structured domain error carrying machine-readable code, user-facing message,
@@ -43,6 +46,9 @@ type AppError struct {
 	SSHAuthPrompt    *SSHAuthPrompt       `json:"sshAuthPrompt,omitempty"`
 	CredentialSaved  bool                 `json:"credentialSaved,omitempty"`
 	SaveWarning      string               `json:"saveWarning,omitempty"`
+	ConflictRowKey   string               `json:"conflictRowKey,omitempty"`
+
+	cause error
 }
 
 func (e *AppError) Error() string {
@@ -53,6 +59,21 @@ func (e *AppError) Error() string {
 		return fmt.Sprintf("[%s] %s (%s)", e.Code, e.Message, e.Detail)
 	}
 	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+
+func (e *AppError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *AppError) WithCause(err error) *AppError {
+	if e == nil {
+		return nil
+	}
+	e.cause = err
+	return e
 }
 
 func NewAppError(code ErrorCode, message string, detail string) *AppError {

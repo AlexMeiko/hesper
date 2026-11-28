@@ -21,6 +21,7 @@ type runtimeSSHSecretKey struct{}
 type runtimeSSHSecret struct {
 	secret          string
 	saveSecret      bool
+	expectedCfgVer  uint64
 	handledSave     atomic.Bool
 	credentialSaved atomic.Bool
 	saveWarningMu   sync.Mutex
@@ -62,6 +63,29 @@ func runtimeSSHSecretFromContext(ctx context.Context) *runtimeSSHSecret {
 	return v
 }
 
+type expectedConfigVersionKey struct{}
+
+// withExpectedConfigVersion pins a request (even without an interactive runtimeSSHSecret carrier)
+// to the plan's expected ConfigVersion so ResolveConfig rejects stale plans before reading stored
+// DB/SSH secrets or dialing an edited endpoint.
+func withExpectedConfigVersion(ctx context.Context, expectedCfgVer uint64) context.Context {
+	if expectedCfgVer == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, expectedConfigVersionKey{}, expectedCfgVer)
+}
+
+func expectedConfigVersionFromContext(ctx context.Context) uint64 {
+	if ctx == nil {
+		return 0
+	}
+	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 {
+		return carrier.expectedCfgVer
+	}
+	v, _ := ctx.Value(expectedConfigVersionKey{}).(uint64)
+	return v
+}
+
 // resolveSSHTunnel implements:
 //  1. Pre-auth credential metadata save when saveSecret==true (before TryAcquireExisting & AcquireDialer,
 //     re-checking configVer & existence under write lock, NEVER bumping configVer or closing a live tunnel).
@@ -78,10 +102,13 @@ func (s *ConnectionService) resolveSSHTunnel(
 	carrier := runtimeSSHSecretFromContext(ctx)
 
 	// 1. Pre-auth save entry: runs BEFORE TryAcquireExisting and BEFORE SSH auth so checked
-	// submissions always persist (even when reusing a live tunnel or if auth subsequently fails).
+	// submissions always persist (even when reusing a live tunnel or if auth subsequently fails),
+	// while skipping persistence if carrier is pinned to an older ConfigVersion.
 	if carrier != nil && carrier.saveSecret && carrier.secret != "" && (authMethod == "password" || authMethod == "key") {
 		if carrier.handledSave.CompareAndSwap(false, true) {
-			s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+			if carrier.expectedCfgVer == 0 || carrier.expectedCfgVer == cfgVer {
+				s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+			}
 		}
 	}
 
@@ -102,23 +129,29 @@ func (s *ConnectionService) resolveSSHTunnel(
 
 	// 3. No live tunnel -> resolve credentials with unified priority:
 	//    (1) explicit runtime secret from ctx, (2) stored secret from secret.Store.
+	//    When loading a stored secret, acquire cfgMu.RLock() and verify configVerLocked(connID)==cfgVer
+	//    so a concurrent SaveConnection can never pair a newly saved SSH secret with an older endpoint.
 	sshCfg := baseCfg
 	switch authMethod {
 	case "password":
 		if carrier != nil && carrier.secret != "" {
 			sshCfg.Password = carrier.secret
 		} else if s.secrets != nil {
-			if stored, serr := s.secrets.Get(sshPasswordRef(connID)); serr == nil {
-				sshCfg.Password = stored
+			stored, serr := s.readStoredSSHSecretForVersion(ctx, connID, cfgVer, sshPasswordRef(connID), sshCfg, carrier)
+			if serr != nil {
+				return nil, 0, serr
 			}
+			sshCfg.Password = stored
 		}
 	case "key":
 		if carrier != nil && carrier.secret != "" {
 			sshCfg.Passphrase = carrier.secret
 		} else if s.secrets != nil {
-			if stored, serr := s.secrets.Get(sshPassphraseRef(connID)); serr == nil {
-				sshCfg.Passphrase = stored
+			stored, serr := s.readStoredSSHSecretForVersion(ctx, connID, cfgVer, sshPassphraseRef(connID), sshCfg, carrier)
+			if serr != nil {
+				return nil, 0, serr
 			}
+			sshCfg.Passphrase = stored
 		}
 	}
 
@@ -129,6 +162,38 @@ func (s *ConnectionService) resolveSSHTunnel(
 		return nil, 0, appErr
 	}
 	return dialFn, gen, nil
+}
+
+// readStoredSSHSecretForVersion reads a stored SSH password/passphrase while holding cfgMu.RLock()
+// and re-checking configVerLocked(connID) == cfgVer so concurrent SaveConnection/DeleteConnection
+// cannot pair a newer credential with an older SSH endpoint snapshot.
+func (s *ConnectionService) readStoredSSHSecretForVersion(
+	ctx context.Context,
+	connID string,
+	cfgVer uint64,
+	secretRef string,
+	sshCfg tunnel.SSHConfig,
+	carrier *runtimeSSHSecret,
+) (string, error) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+
+	if s.configVerLocked(connID) != cfgVer {
+		if expectedConfigVersionFromContext(ctx) > 0 {
+			appErr := dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
+			attachSaveOutcomeToError(appErr, carrier)
+			return "", appErr
+		}
+		appErr := mapTunnelError(fmt.Errorf("连接配置已变更，请重试连接"), connID, sshCfg)
+		attachSaveOutcomeToError(appErr, carrier)
+		return "", appErr
+	}
+	stored, err := s.secrets.Get(secretRef)
+	if err != nil {
+		// Preserve existing behavior: missing/unreadable stored secret falls through to SSHAuthPrompt.
+		return "", nil
+	}
+	return stored, nil
 }
 
 // saveRuntimeSSHCredential updates the stored SSH credential & SaveCredential=true metadata
@@ -220,6 +285,10 @@ func (s *ConnectionService) PrepareRuntimeSSHCredential(ctx context.Context, con
 	if ent == nil {
 		return
 	}
+	if carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+		// Connection configuration changed since the plan was created; never write secret to an edited host.
+		return
+	}
 	var params dto.ConnectionParams
 	if err := json.Unmarshal([]byte(ent.ConfigJSON), &params); err != nil {
 		carrier.setSaveWarning("保存 SSH 凭据前解析连接配置失败: " + err.Error())
@@ -232,7 +301,11 @@ func (s *ConnectionService) PrepareRuntimeSSHCredential(ctx context.Context, con
 	if authMethod != "password" && authMethod != "key" {
 		return
 	}
-	s.saveRuntimeSSHCredential(ctx, connID, cfgVer, authMethod, carrier.secret, carrier)
+	expectedVer := cfgVer
+	if carrier.expectedCfgVer > 0 {
+		expectedVer = carrier.expectedCfgVer
+	}
+	s.saveRuntimeSSHCredential(ctx, connID, expectedVer, authMethod, carrier.secret, carrier)
 }
 
 // TrustSSHHostKey atomically persists a user-confirmed SSH host key fingerprint.
@@ -341,7 +414,7 @@ func mapTunnelError(err error, connID string, cfg tunnel.SSHConfig) *dto.AppErro
 	if errors.As(err, &ae) {
 		return ae
 	}
-	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error())
+	return dto.NewAppError(dto.ErrTunnelFailed, fmt.Sprintf("建立 SSH 隧道失败 (%s): %s", tunnel.NormalizeHostPort(cfg.Host, cfg.Port), err.Error()), err.Error()).WithCause(err)
 }
 
 func attachSaveOutcomeToError(appErr *dto.AppError, carrier *runtimeSSHSecret) {

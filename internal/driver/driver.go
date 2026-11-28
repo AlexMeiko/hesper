@@ -28,6 +28,8 @@ type ResolvedConfig struct {
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 	// TunnelGen identifies the pooled SSH tunnel instance used to open this connection (0 when direct/transient).
 	TunnelGen uint64
+	// ConfigVersion is the monotonically increasing connection config version captured atomically at ResolveConfig time.
+	ConfigVersion uint64
 }
 
 // BoundStatement is a parameterized SQL statement shared by execution and preview.
@@ -131,6 +133,114 @@ type SequenceInspector interface {
 	ListSequences(ctx context.Context, db, schema string) ([]dto.ObjectSummary, error)
 }
 
+// WriteTarget identifies the concrete table targeted by a transactional grid write operation.
+type WriteTarget struct {
+	Database string
+	Schema   string
+	Table    string
+}
+
+// ResolvedTarget captures the resolved physical destination of a grid write plan.
+type ResolvedTarget struct {
+	Engine   dto.EngineType
+	Host     string
+	Port     int
+	FilePath string
+	Database string
+	Schema   string
+	Table    string
+	ReadOnly bool
+}
+
+// SourceRef binds an immutable ChangePlan to the exact connection config version,
+// session lifecycle epoch, and resolved target captured at Preview time.
+type SourceRef struct {
+	ConnectionID   string
+	ConfigVersion  uint64
+	LifecycleEpoch uint64
+	Target         ResolvedTarget
+}
+
+// CompareStrategy tells internal/changeset how to construct exact equality predicates
+// for optimistic concurrency checks without leaking dialect rules into frontend or ChangeService.
+type CompareStrategy string
+
+const (
+	CompareExact              CompareStrategy = "exact"
+	CompareMySQLBinary        CompareStrategy = "mysql_binary"
+	CompareMySQLJSON          CompareStrategy = "mysql_json"
+	ComparePGJSONText         CompareStrategy = "pg_json_text"
+	ComparePGJSONB            CompareStrategy = "pg_jsonb"
+	ComparePGCCollation       CompareStrategy = "pg_c_collation"
+	ComparePGCCollationBPChar CompareStrategy = "pg_c_collation_bpchar"
+	CompareSQLiteBinaryTypeof CompareStrategy = "sqlite_binary_typeof"
+	CompareUnsupported        CompareStrategy = "unsupported"
+)
+
+// WriteColumn combines UI-facing ColumnDetail with backend-only native metadata needed
+// for accurate binding, comparison predicate generation, and schema fingerprinting.
+type WriteColumn struct {
+	Detail               dto.ColumnDetail
+	NativeType           string // PG format_type / MySQL DATA_TYPE / SQLite declared type
+	Collation            string
+	Deterministic        bool   // PG pg_collation.collisdeterministic (defaults to true)
+	SQLiteAffinity       string // integer | text | blob | real | numeric
+	GenerationExpression string // MySQL/MariaDB information_schema.COLUMNS.GENERATION_EXPRESSION
+	CompareStrategy      CompareStrategy
+	KeyComparable        bool // whether this column may participate as a stable key in WHERE
+}
+
+// WriteSchema is the authoritative backend table schema snapshot shared identically
+// between PreviewGridChanges and ApplyGridChanges (inside the locked transaction).
+type WriteSchema struct {
+	Dialect         dto.EngineType
+	Database        string
+	Schema          string
+	Table           string
+	StorageEngine   string
+	WithoutRowID    bool   // SQLite PRAGMA table_list wr == 1
+	Strict          bool   // SQLite PRAGMA table_list strict == 1
+	TableDefinition string // Canonical table DDL when catalog column metadata omits expressions (e.g. SQLite sqlite_schema.sql)
+	Editability     dto.TableEditability
+	Columns         []WriteColumn
+}
+
+// CommitOutcome is the driver-authoritative tri-state result of TableWriteTx.Commit.
+type CommitOutcome string
+
+const (
+	CommitOutcomeCommitted    CommitOutcome = "committed"
+	CommitOutcomeNotCommitted CommitOutcome = "not_committed"
+	CommitOutcomeUnknown      CommitOutcome = "unknown"
+)
+
+// CommitResult carries the authoritative commit outcome and structured error when non-committed.
+type CommitResult struct {
+	Outcome CommitOutcome
+	Err     *dto.AppError
+}
+
+// TableWriteInspector reads the authoritative WriteSchema for PreviewGridChanges.
+type TableWriteInspector interface {
+	InspectWriteSchema(ctx context.Context, target WriteTarget, clientReadOnly bool) (WriteSchema, error)
+}
+
+// TableWriteStarter atomically starts a write transaction, acquires driver-appropriate
+// table metadata/write protection, and reads the authoritative WriteSchema inside that transaction.
+// On any error, the driver MUST roll back / clean up any internal transaction before returning.
+type TableWriteStarter interface {
+	TableWriteInspector
+	BeginTableWrite(ctx context.Context, target WriteTarget, clientReadOnly bool) (TableWriteTx, error)
+}
+
+// TableWriteTx represents a protected transactional grid write session on a dedicated short connection.
+type TableWriteTx interface {
+	Schema() WriteSchema
+	Exec(ctx context.Context, stmt BoundStatement) (ExecFact, error)
+	Commit(ctx context.Context) CommitResult
+	Rollback(ctx context.Context) error
+}
+
 // --- Static Driver Registry ---
 
 type Registry struct {
@@ -188,6 +298,15 @@ func (t *TrackedConn) Read(p []byte) (int, error) {
 		t.bytesRead.Add(int64(n))
 	}
 	return n, err
+}
+
+// WriteSent returns true if at least one byte was sent on the wire since Reset(),
+// regardless of whether partial response bytes or TLS record headers were read afterwards.
+func (t *TrackedConn) WriteSent() bool {
+	if t == nil {
+		return false
+	}
+	return t.bytesWritten.Load() > 0
 }
 
 // WriteSentWithoutResponse returns true if at least one byte was sent on the wire
