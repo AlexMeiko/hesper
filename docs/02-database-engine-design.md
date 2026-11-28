@@ -1,6 +1,6 @@
 # 02. 数据库引擎与核心行为契约
 
-本文档是 `sql-manager` 中**驱动小接口拆分、取消与断线语义、只读与翻页契约、网格并发写入规则、以及跨库改表迁移结果**的**唯一权威定义**。前端交互与测试验收均以此处规则为准。
+本文档是 `Hesper` 中**驱动小接口拆分、取消与断线语义、只读与翻页契约、网格并发写入规则、以及跨库改表迁移结果**的**唯一权威定义**。前端交互与测试验收均以此处规则为准。
 
 ---
 
@@ -190,43 +190,62 @@ sequenceDiagram
 
 ---
 
-## 4. 权威规则三：网格写入与并发冲突检测（`internal/changeset`）
+## 4. 权威规则三：网格写入与并发冲突检测 (`internal/changeset` + `driver.TableWriteStarter`)
 
-### 4.1 三维度独立判定（`TableEditability`）
-某张表在网格中允许哪些写入操作，由后端独立计算三个维度并返回给前端：
+### 4.1 三维度独立判定 (`TableEditability`) 与列级能力
+某张表在网格中允许哪些写入操作，由后端在 `TableWriteInspector.InspectWriteSchema` 中 fail-closed 计算并返回给前端：
 
 ```go
 type RowIdentityKind string
 
 const (
-    RowIdentityNone          RowIdentityKind = "none"           // 无稳定唯一键
-    RowIdentityPrimaryKey    RowIdentityKind = "primary_key"    // 显式主键（含 SQLite 显式 INTEGER PRIMARY KEY）
+    RowIdentityNone          RowIdentityKind = "none"            // 无稳定唯一键
+    RowIdentityPrimaryKey    RowIdentityKind = "primary_key"     // 真正非空唯一的显式主键
     RowIdentityUniqueNotNull RowIdentityKind = "unique_not_null" // 覆盖全表的显式非空唯一键
 )
 
 type TableEditability struct {
-    CanWrite           bool            `json:"canWrite"`           // 连接非只读且具备表写权限
+    CanWrite           bool            `json:"canWrite"`           // 连接非只读且为可写基表
     RowIdentity        RowIdentityKind `json:"rowIdentity"`        // 行可唯一定位方式
     KeyColumns         []string        `json:"keyColumns"`         // 构成稳定键的列名
     BatchTransactional bool            `json:"batchTransactional"` // 存储引擎是否支持整批原子回滚
-    StorageEngine      string          `json:"storageEngine"`      // 如 InnoDB / MyISAM / heap / sqlite
-    Reasons            []string        `json:"reasons,omitempty"`  // 受限原因事实码，供 binding 转文案
+    StorageEngine      string          `json:"storageEngine"`      // 如 InnoDB / MyISAM / heap / SQLite
+    Reasons            []string        `json:"reasons,omitempty"`  // 受限原因事实码
 }
 ```
 
-**三项硬性约束**：
-1. **更新与删除的行定位准入**：仅当 `RowIdentity` 为 **`primary_key`** 或 **`unique_not_null`** 时，才允许网格 `UPDATE` 和 `DELETE`。
-   - **SQLite 关键边界**：显式定义的 `INTEGER PRIMARY KEY`（或显式 `PRIMARY KEY` / 非空唯一键）可作为稳定键使用；**严禁使用隐式 `rowid` 进行网格延迟提交**（实测 SQLite `VACUUM` 会重排隐式 `rowid`，导致提交时指向完全不同的记录！）。
-   - **无稳定键表**：`RowIdentity == none` 时禁止 `UPDATE` 与 `DELETE`（返回 `ERR_ROW_NOT_IDENTIFIABLE`），但若 `CanWrite == true`，**仍允许网格 `INSERT` 新增行**。
-2. **非事务表禁止“整批提交”**：MySQL / MariaDB 中使用 `MyISAM`、`MEMORY` 等非事务存储引擎的表（`BatchTransactional == false`），即使有主键也不能承诺整批回滚；**首版不开放“整批提交”**（返回 `ERR_BATCH_NON_TRANSACTIONAL`），避免在界面上作出无法兑现的原子性承诺。
-3. **预览与执行严格同源（参数化 `ChangePlan`）**：`internal/changeset` 为一次提交生成唯一的 `ChangePlan`，每步包含 `driver.BoundStatement{SQL, Args}` 与 `ExpectedMatchedRows`；预览弹窗通过 `DialectFormatter.FormatPreviewSQL` 渲染同一份 `ChangePlan`，执行时直接把相同的 `BoundStatement` 传入 `Tx.Exec(ctx, stmt)`。
+**四库稳定键与可写性硬性约束**：
+1. **稳定键完备性**：仅当 `RowIdentity` 为 **`primary_key`** 或 **`unique_not_null`** 且每条 `UPDATE` / `DELETE` 提供全部稳定键列的非空、未截断、非二进制、可比较原值时才允许改删；稳定键列绝不可因截断或二进制而从 `WHERE` 中省略。无稳定键表 (`RowIdentityNone`) 拒绝改删 (`ERR_ROW_NOT_IDENTIFIABLE`)，但若 `CanWrite == true` 仍允许网格 `INSERT`。
+   - **SQLite 严格主键规则**：普通非 `STRICT` rowid 表上的 `TEXT PRIMARY KEY`、`INT PRIMARY KEY`、`INTEGER PRIMARY KEY DESC` 或未显式声明 `NOT NULL` 的复合主键在 SQLite 中允许重复 `NULL`，一律拒绝作为主键 (降级检索全列 `NOT NULL` 的非部分非表达式 `UNIQUE` 索引，均不满足则返回 `RowIdentityNone`)。仅以下四类主键可判为 `RowIdentityPrimaryKey`：(a) `WITHOUT ROWID` 表；(b) `STRICT` 表；(c) 单列精确 `INTEGER PRIMARY KEY` (`rowid` 别名，无 `origin="pk"` 自动索引)；(d) 全部主键列显式 `notnull = 1`。严禁使用隐式 `rowid` 延迟定位 (`VACUUM` 会重排 `rowid`)。
+   - **PostgreSQL 索引键裁剪**：`PRIMARY KEY` 与 `UNIQUE NOT NULL` 均须按 `k.ord <= i.indnkeyatts` 排除 `INCLUDE (...)` 非键列，且排除部分索引 (`indpred IS NOT NULL`) 与表达式索引 (`attnum <= 0`)。
+   - **MySQL / MariaDB 表达式索引安全**：`information_schema.STATISTICS.COLUMN_NAME` 必须按 `sql.NullString` 扫描，遇到函数/表达式索引立即排除，绝不阻断表结构探测；列可空映射采用 fail-closed `notNullMap`。
+2. **列写入能力 (`Insertable` / `Updatable`)**：使用 PostgreSQL `attgenerated`/`attidentity`、MySQL `EXTRA` (`VIRTUAL GENERATED`/`STORED GENERATED`) 与 SQLite `PRAGMA table_xinfo` (`hidden=2/3`) 识别生成列与 `GENERATED ALWAYS AS IDENTITY` 列并标记只读；不可可靠比较类型 (`float`/`double`/`bytea`/`blob`/数组/复合/几何) 首版限制行内修改。前端仅消费后端下发的 `Insertable` / `Updatable` / `ReadOnlyReason`，不做方言判断。
+3. **非事务表禁止整批提交**：MySQL / MariaDB 非 InnoDB (如 `MyISAM`) 标记 `BatchTransactional == false`，直接返回 `ERR_BATCH_NON_TRANSACTIONAL`。
 
-### 4.2 并发冲突检测与“未改变值（No-op）”区分
-- **提交前剔除无变化修改**：变更收集阶段若某格编辑后的值与原值严格一致（含 `NULL` vs `""` 精确比较），视为 No-op，不纳入 `UPDATE`。
-- **可靠版本或约定原值校验**：
-  - 优先使用表配置的可靠版本列（如单调递增版本号）；否则使用 **稳定键原值 + 本次修改列（及约定追踪的非大对象列）原始值** 构造 `WHERE` 条件（`NULL` 严格使用 `IS NULL` / `IS NOT DISTINCT FROM`）。
-  - **MySQL / MariaDB 关键配置**：连接 DSN 启用 **`clientFoundRows=true`**，使驱动返回的是 **`WHERE` 命中的行数（matched rows）** 而非“值发生改变的行数（changed rows）”，从而精准区分“新旧值恰好相等（matched=1，非冲突）”与“行已被其他会话修改或删除（matched=0，真正并发冲突）”！
-- **事务级原子回滚与草稿保护**：批次内任一条 `UPDATE`/`DELETE` 命中 `matched == 0` 立即 `ROLLBACK` 并返回 `ERR_CONCURRENCY_CONFLICT`（`matched > 1` 则立即 `ROLLBACK` 并返回 `ERR_ROW_NOT_IDENTIFIABLE`）；前端保留用户未提交草稿以便刷新比对。
+### 4.2 六条核心执行边界与 `PlanStore` 单持有者状态机
+1. **不可变 `ChangePlan` + `PlanStore` 状态机**：
+   - `ChangePlan` 仅保存预览时锁定的不可变数据 (`SourceRef`、`SchemaFingerprint`、按固定顺序 **`Deletes → Updates → Inserts`** 排列的 `Steps`)。
+   - `PlanStore` 唯一持有执行状态：`Ready → Preparing → Executing → Finished(Committed | NotCommitted | Unknown)`。仅建连前白名单可恢复错误 (SSH 主机指纹确认 `ERR_TUNNEL_FAILED + HostKeyChallenge`、SSH 凭据质询 `ERR_AUTH_FAILED + SSHAuthPrompt`、以及可明确识别的建连超时 `context.DeadlineExceeded` / `net.Error.Timeout()`) 释放回 `Ready` 并通过错误通道返回供前端 `runWithSSHChallenges` 复用同一 `planID`；其余所有失败 (含非超时连接错误如 SQLite 文件不存在、`BeginTableWrite` 锁超时/权限/SQLite busy、结构漂移、非事务引擎、上下文取消) 一律收口为 `Finished(NotCommitted)`。进入 `Executing` 后同一 `planID` 永久不可再执行；进入 `Finished` 立即释放 `Steps` 大负载，且 `defer` 清理严禁覆盖已写入的 `Finished` 终态。
+   - **Wails 终态返回契约**：对于已产生明确执行终态 (`committed` / `not_committed` / `unknown`，含保留期内的终态缓存命中)，`ApplyGridChanges` 统一返回 `(resp, nil)`，确保前端 Promise 稳定读取 `resp.outcome`、`resp.conflictRowKey` 与 `resp.error`；仅交互式 SSH 质询、可重试建连超时及非法/过期/并发重入请求返回 `(zeroResp, appErr)`。
+2. **受管操作租约 (`session.Manager.AcquireOperation`)**：
+   - `PreviewGridChanges` 通过 `AcquireOperation(ctx, connID, db, nil)` 从本次租约直接取得 `SourceRef{ConnectionID, ConfigVersion, LifecycleEpoch, Target}`；`ApplyGridChanges` 传入 `&plan.Source`，锁内预登记可取消操作、锁外核对 `ResolvedConfig.ConfigVersion` 与目标后建连、回锁复查 `LifecycleEpoch` 与 `TunnelGen`。断连仅递增 `LifecycleEpoch` 并取消在途操作，不删除 `PlanStore` 终态记录。
+3. **驱动原子保护与事务内 `SchemaFingerprint` 复核 (`TableWriteStarter` / `TableWriteTx`)**：
+   - `BeginTableWrite` 在独立短连接上开启事务、取得表级保护 (PG `ACCESS SHARE`、MySQL/MariaDB `SHARED_READ` MDL、SQLite `BEGIN IMMEDIATE`) 并在同一事务内读取 `WriteSchema`，失败由驱动自行回滚。
+   - `SchemaFingerprint` (SHA-256) 完整覆盖表属性与每列写入语义，包括完整 `Detail.ColumnType` (如 `DECIMAL(38,10)` vs `DECIMAL(38,2)`、`VARCHAR` 长度、`UNSIGNED`)、`HasDefault`、`DefaultValue`、`AutoIncrement`、`GeneratedKind`、`IdentityKind`、`Collation`、`Deterministic`、`SQLiteAffinity`、`WithoutRowID`、`Strict` 与比较策略；不一致直接回滚并返回 `ERR_SCHEMA_CHANGED`。
+4. **驱动权威三态提交结果 (`CommitResult`)**：
+   - `TableWriteTx.Commit(ctx)` 直接返回 `Committed | NotCommitted | Unknown`：仅按错误码与协议事实白名单判定 `NotCommitted` (PG 含 `pgx.ErrTxCommitRollback`、明确拒绝提交的 SQLSTATE 如 `22*`/`23*`/`25*`/`40000`/`40001`/`40002`/`40P01`/`42*`/`44*`/`53*`/`55*`；MySQL/MariaDB 含 `1048`/`1062`/`1205`/`1213`/`1290`/`1792`/`3819`/`4025` 及对应白名单 SQLSTATE)，**`40003` (`statement_completion_unknown`)**、连接/关停/内部异常、以及写包后任意断连或部分回包一律保守判 `Unknown` (`ERR_COMMIT_OUTCOME_UNKNOWN`, `RetrySafe: false`)；SQLite 采用本地文件提交错误码独立分类，不套用网络 `WriteSent` 规则。
+
+### 4.3 分离新/原值绑定、No-op 剔除与方言原值校验谓词
+- **互斥新值 (`NewCellValue`) 与独立原值 (`OriginalCellValue`)**：新值采用 `literal` / `null` / `default` 互斥模式；原值携带 `BrowseTable` 读取到的真实事实 (`Kind`, `Text`, `Truncated`, SQLite `StorageClass`)。
+  - **SQLite 亲和性边界**：`BrowseTable` 同时读取 `typeof(<col>)` 填充 `StorageClass` 并在 `typeof == 'text'` 时保真返回原始文本 (防止 `DATETIME` 字符串被改写)。新值写入时 `TEXT`、无类型及 **`STRICT` 表的 `ANY` 列**保持原始输入文本 (含 `"000123"` 前导零与任意精度字符串；普通非 `STRICT` 表的 `ANY` 维持 `NUMERIC` 亲和性)；`NUMERIC`/`INTEGER` 列允许非数字文本 (如 ISO 时间戳、JSON) 原样按 `TEXT` 写入，对触发数值强转的数字字面量施加精确 `int64` 或严格 `big.Rat.SetFloat64(f)` 无舍入校验 (拒绝 `1e23` 等一切会舍入的数字并返回 `ERR_PRECISION_UNSUPPORTED`)；原值绑定按 `StorageClass` 忠实还原既有值 (如已有 `REAL 0.1`)，不套用新值精度限制。
+- **No-op 剔除与 `UPDATE` `WHERE` 契约**：
+  - 逐列比对新旧值 (严格区分 `NULL` vs `""` 与 SQLite `StorageClass`)，未变化单元格直接剔除；整行恢复原值则不生成 `UPDATE` (发 0 条写语句，不触发 `AFTER UPDATE` 触发器)。
+  - 修改列原值为 `NULL` 时必须生成 `<col> IS NULL` (严禁生成 `= NULL` 或 `= ?`)；修改主键列本身时 `WHERE` 仍严格使用主键原值且不重复追加同一键列谓词。
+- **按方言与排序规则生成精确比较谓词**：
+  - **MySQL / MariaDB** (保持 `clientFoundRows=true` 核对 matched rows)：全部可编辑字符列 (含 `latin1` 等非 `utf8mb4` 列及 `utf8mb4_bin` 等 `PAD SPACE` 排序规则) 统一先转同字符集再逐字节比较：`CAST(CONVERT(<col> USING utf8mb4) AS BINARY) = CAST(CONVERT(? USING utf8mb4) AS BINARY)` (字符键列附加 `<col> = ?` 走索引)；MySQL `json` 采用 `CAST(<col> AS JSON) = CAST(? AS JSON)`。
+  - **PostgreSQL**：`json` 采用 `<col>::text = $n`，`jsonb` 采用 `<col> = $n::jsonb`，非确定性排序字符列 (`!collisdeterministic`) 及 `citext` 采用 `<col>::text COLLATE "C" = $n` (键列附加 `<col> = $n`)。
+  - **SQLite**：采用 `<col> COLLATE BINARY = ? AND typeof(<col>) = ?`，兼顾 `COLLATE NOCASE` 大小写敏感与动态存储类型区分。
+- **原子回滚与精确行数校验**：任一条 `UPDATE` / `DELETE` 命中 `AffectedRows == 0` 立即回滚并返回 `ERR_CONCURRENCY_CONFLICT` (附 `ConflictRowKey`)；`AffectedRows > 1` 立即回滚并返回 `ERR_ROW_NOT_IDENTIFIABLE`；单行 `INSERT` 同样强制校验 `AffectedRows == 1` (如 PG `BEFORE INSERT` 触发器 `RETURN NULL` 跳过导致影响 0 行，立即回滚整批并返回 `ERR_TX_ABORTED`)。
 
 ---
 
