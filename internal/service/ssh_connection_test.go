@@ -1080,6 +1080,26 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 		assertSecret(t, secrets, sshPasswordRef(saved.ID), "", fmt.Sprintf("saveSecret=%v stale ResolveConfig must not persist secret", saveSecret))
 	}
 
+	// 3b. Carrierless ApplyGridChanges path (no runtimeSSHSecret in ctx, e.g. using a stored SSH credential):
+	//     withExpectedConfigVersion MUST ALSO fail closed with ErrPlanInvalidated BEFORE reading secrets or dialing sshSrv2!
+	{
+		getsBefore := secrets.getCount.Load()
+		staleCarrierlessCtx := withExpectedConfigVersion(ctx, initCfg.ConfigVersion)
+		_, rerr := connSvc.ResolveConfig(staleCarrierlessCtx, saved.ID, "demo")
+		var appErr *dto.AppError
+		if !errors.As(rerr, &appErr) || appErr.Code != dto.ErrPlanInvalidated {
+			t.Fatalf("carrierless stale ResolveConfig: expected ErrPlanInvalidated, got %v", rerr)
+		}
+		if secrets.getCount.Load() != getsBefore {
+			t.Fatalf("carrierless stale ResolveConfig MUST reject before reading secrets (gets before=%d after=%d)",
+				getsBefore, secrets.getCount.Load())
+		}
+		if sshSrv2.connCount.Load() != 0 || sshSrv2.authAttempts.Load() != 0 {
+			t.Fatalf("carrierless stale ResolveConfig MUST NOT dial edited host sshSrv2, got connCount=%d authAttempts=%d",
+				sshSrv2.connCount.Load(), sshSrv2.authAttempts.Load())
+		}
+	}
+
 	// 4. Positive control: ResolveConfig with the updated ConfigVersion succeeds, reads DB password, and authenticates with sshSrv2.
 	freshCtx, freshCarrier := withRuntimeSSHSecret(ctx, "secret-for-host-2", false)
 	freshCarrier.expectedCfgVer = initCfg.ConfigVersion + 1

@@ -63,6 +63,29 @@ func runtimeSSHSecretFromContext(ctx context.Context) *runtimeSSHSecret {
 	return v
 }
 
+type expectedConfigVersionKey struct{}
+
+// withExpectedConfigVersion pins a request (even without an interactive runtimeSSHSecret carrier)
+// to the plan's expected ConfigVersion so ResolveConfig rejects stale plans before reading stored
+// DB/SSH secrets or dialing an edited endpoint.
+func withExpectedConfigVersion(ctx context.Context, expectedCfgVer uint64) context.Context {
+	if expectedCfgVer == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, expectedConfigVersionKey{}, expectedCfgVer)
+}
+
+func expectedConfigVersionFromContext(ctx context.Context) uint64 {
+	if ctx == nil {
+		return 0
+	}
+	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 {
+		return carrier.expectedCfgVer
+	}
+	v, _ := ctx.Value(expectedConfigVersionKey{}).(uint64)
+	return v
+}
+
 // resolveSSHTunnel implements:
 //  1. Pre-auth credential metadata save when saveSecret==true (before TryAcquireExisting & AcquireDialer,
 //     re-checking configVer & existence under write lock, NEVER bumping configVer or closing a live tunnel).

@@ -100,7 +100,7 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 		s.cfgMu.RUnlock()
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrNotFound, "连接配置不存在", connID)
 	}
-	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+	if expectedVer := expectedConfigVersionFromContext(ctx); expectedVer > 0 && cfgVer != expectedVer {
 		s.cfgMu.RUnlock()
 		// Connection config changed since the plan/challenge was created: reject BEFORE reading stored DB
 		// credentials or calling resolveSSHTunnel so stale plans never access secrets or dial an edited host.
