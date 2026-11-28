@@ -68,6 +68,8 @@ type mysqlBeginLookahead uint8
 
 const (
 	mysqlBeginNone mysqlBeginLookahead = iota
+	mysqlBeginSawOuterBegin
+	mysqlBeginSawOuterNot
 	mysqlBeginSawBegin
 	mysqlBeginSawNot
 )
@@ -870,6 +872,7 @@ func (t *compoundTracker) onMySQLWord(upper string) {
 		switch upper {
 		case "BEGIN":
 			t.enterMySQLCompoundBlock(false)
+			t.mysqlBeginLook = mysqlBeginSawOuterBegin
 		case "IF", "CASE", "LOOP", "WHILE", "REPEAT", "FOR":
 			// Valid MySQL/MariaDB compound body without an outer BEGIN (e.g. IF...END IF or FOR...END FOR).
 			// Refuse to fall back to splitting on ';'; instruct caller to use DELIMITER.
@@ -974,8 +977,8 @@ const (
 	eventEOF
 )
 
-// resolveMySQLPending resolves lookahead after a statement-level BEGIN (including MariaDB nested
-// BEGIN NOT ATOMIC) or END inside modeMySQLCompoundBody.
+// resolveMySQLPending resolves lookahead after a statement-level BEGIN (including MariaDB outer
+// and nested BEGIN NOT ATOMIC) or END inside modeMySQLCompoundBody.
 // Returns true if the current event was fully consumed by the lookahead resolution.
 func (t *compoundTracker) resolveMySQLPending(ev trackerEventKind, word string) bool {
 	if t.mode != modeMySQLCompoundBody {
@@ -983,6 +986,26 @@ func (t *compoundTracker) resolveMySQLPending(ev trackerEventKind, word string) 
 	}
 
 	switch t.mysqlBeginLook {
+	case mysqlBeginSawOuterBegin:
+		if ev == eventWord && word == "NOT" {
+			t.mysqlBeginLook = mysqlBeginSawOuterNot
+			return true
+		}
+		t.mysqlBeginLook = mysqlBeginNone
+		// Outer BEGIN frame is already recorded (mysqlBeginDepth == 1, mysqlAtStmtStart == true);
+		// let caller dispatch ev as the first body token.
+
+	case mysqlBeginSawOuterNot:
+		t.mysqlBeginLook = mysqlBeginNone
+		if ev == eventWord && word == "ATOMIC" {
+			// Consumed optional outer "BEGIN NOT ATOMIC" opener; keep the single outer frame at statement start.
+			return true
+		}
+		// Malformed "BEGIN NOT <other>": keep single outer frame and record "NOT" as first body token.
+		t.mysqlStmtFirstWord = "NOT"
+		t.mysqlAtStmtStart = false
+		t.mysqlStmtWordCount = 1
+
 	case mysqlBeginSawBegin:
 		if ev == eventWord && word == "WORK" {
 			t.mysqlBeginLook = mysqlBeginNone

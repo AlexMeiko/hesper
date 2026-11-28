@@ -1134,6 +1134,45 @@ SELECT 5;`
 			t.Fatalf("SET @@session.transaction_read_only = 0 MUST still be flagged as read-only escape")
 		}
 	})
+
+	t.Run("MariaDB outer routine body BEGIN NOT ATOMIC with immediate nested BEGIN stays atomic", func(t *testing.T) {
+		src := "CREATE PROCEDURE p_outer_bna()\n" +
+			"BEGIN NOT ATOMIC\n" +
+			"  BEGIN\n" +
+			"    SELECT 1;\n" +
+			"  END;\n" +
+			"  UPDATE stats SET n = n + 1;\n" +
+			"END;\n" +
+			"CREATE PROCEDURE p_outer_bna_nested_bna() BEGIN NOT ATOMIC\n" +
+			"  BEGIN NOT ATOMIC\n" +
+			"    SELECT 2;\n" +
+			"  END;\n" +
+			"  UPDATE stats SET n = n + 2;\n" +
+			"END;\n" +
+			"CREATE PROCEDURE p_outer_bna_empty() BEGIN NOT ATOMIC END;\n" +
+			"SELECT 3;"
+		stmts := Split(src, DialectMySQL)
+		if len(stmts) != 4 {
+			t.Fatalf("outer BEGIN NOT ATOMIC got %d statements, want 4: %+v", len(stmts), stmts)
+		}
+		for i := 0; i < 3; i++ {
+			if stmts[i].SplitError != "" || stmts[i].Kind != KindDDL {
+				t.Fatalf("stmt[%d] unexpected: %+v", i, stmts[i])
+			}
+		}
+		if stmts[3].Text != "SELECT 3" || stmts[3].SplitError != "" {
+			t.Fatalf("stmt[3] unexpected: %+v", stmts[3])
+		}
+		for i, needle := range []string{
+			"UPDATE stats SET n = n + 1;",
+			"UPDATE stats SET n = n + 2;",
+		} {
+			pos := indexOfMust(t, src, needle)
+			if picked, ok := SelectStatementAtCursor(stmts, pos); !ok || picked.Text != stmts[i].Text {
+				t.Fatalf("cursor on %q selected %q, want full stmt[%d]", needle, picked.Text, i)
+			}
+		}
+	})
 }
 
 func indexOfMust(t *testing.T, src, needle string) int {
