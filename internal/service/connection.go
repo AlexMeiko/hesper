@@ -100,6 +100,11 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 	if ent == nil {
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrNotFound, "连接配置不存在", connID)
 	}
+	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+		// Connection config changed since the plan/challenge was created: reject BEFORE reading stored DB
+		// credentials or calling resolveSSHTunnel so stale plans never access secrets or dial an edited host.
+		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
+	}
 	var params dto.ConnectionParams
 	if err := json.Unmarshal([]byte(ent.ConfigJSON), &params); err != nil {
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "连接参数解析失败", err.Error())
@@ -111,12 +116,6 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 			return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "读取连接凭据失败", err.Error())
 		}
 		password = pw
-	}
-
-	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
-		// Connection config changed since the plan/challenge was created: reject BEFORE resolveSSHTunnel
-		// so the runtime SSH password is never used to authenticate against an edited host (even when saveSecret=false).
-		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
 	}
 
 	var dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)

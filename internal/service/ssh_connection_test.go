@@ -36,6 +36,7 @@ type memSecretStore struct {
 	failDelete        error
 	partialSetOnce    error // mutates vals[ref] THEN returns &secret.PartialMutationError once
 	partialDeleteOnce error // deletes vals[ref] THEN returns &secret.PartialMutationError once
+	getCount          atomic.Int32
 }
 
 func newMemSecretStore() *memSecretStore {
@@ -43,6 +44,7 @@ func newMemSecretStore() *memSecretStore {
 }
 
 func (m *memSecretStore) Get(ref string) (string, error) {
+	m.getCount.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.vals[ref], nil
@@ -987,10 +989,12 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 
 	makeReq := func(id, sshHost string, sshPort int) dto.SaveConnectionRequest {
 		return dto.SaveConnectionRequest{
-			ID:       id,
-			Name:     "Direct ResolveConfig SSH Test",
-			Driver:   dto.EngineMySQL,
-			EnvColor: "green",
+			ID:             id,
+			Name:           "Direct ResolveConfig SSH Test",
+			Driver:         dto.EngineMySQL,
+			EnvColor:       "green",
+			Password:       "db-secret",
+			UpdatePassword: true,
 			Params: dto.ConnectionParams{
 				Host:            "127.0.0.1",
 				Port:            3306,
@@ -1018,8 +1022,8 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial ResolveConfig against sshSrv1 failed: %v", err)
 	}
-	if initCfg.ConfigVersion == 0 {
-		t.Fatalf("expected non-zero ConfigVersion from ResolveConfig")
+	if initCfg.ConfigVersion == 0 || initCfg.Password != "db-secret" {
+		t.Fatalf("expected non-zero ConfigVersion and DB password from ResolveConfig, got ver=%d", initCfg.ConfigVersion)
 	}
 	_ = initCarrier
 
@@ -1030,14 +1034,19 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 
 	// 3. Directly invoke ResolveConfig with a runtimeSSHSecret pinned to the stale ConfigVersion
 	//    (bypassing session.Manager.AcquireOperation's lifecycle check): BOTH saveSecret=false and
-	//    saveSecret=true MUST immediately fail with ErrPlanInvalidated BEFORE dialing sshSrv2!
+	//    saveSecret=true MUST immediately fail with ErrPlanInvalidated BEFORE reading DB password or dialing sshSrv2!
 	for _, saveSecret := range []bool{false, true} {
+		getsBefore := secrets.getCount.Load()
 		staleCtx, carrier := withRuntimeSSHSecret(ctx, "secret-for-host-1", saveSecret)
 		carrier.expectedCfgVer = initCfg.ConfigVersion
 		_, rerr := connSvc.ResolveConfig(staleCtx, saved.ID, "demo")
 		var appErr *dto.AppError
 		if !errors.As(rerr, &appErr) || appErr.Code != dto.ErrPlanInvalidated {
 			t.Fatalf("saveSecret=%v: expected ErrPlanInvalidated from ResolveConfig, got %v", saveSecret, rerr)
+		}
+		if secrets.getCount.Load() != getsBefore {
+			t.Fatalf("saveSecret=%v: stale ResolveConfig MUST reject before reading DB password from secret store (gets before=%d after=%d)",
+				saveSecret, getsBefore, secrets.getCount.Load())
 		}
 		if sshSrv2.connCount.Load() != 0 || sshSrv2.authAttempts.Load() != 0 {
 			t.Fatalf("saveSecret=%v: ResolveConfig MUST NOT dial or send stale password to edited host sshSrv2, got connCount=%d authAttempts=%d",
@@ -1046,15 +1055,15 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 		assertSecret(t, secrets, sshPasswordRef(saved.ID), "", fmt.Sprintf("saveSecret=%v stale ResolveConfig must not persist secret", saveSecret))
 	}
 
-	// 4. Positive control: ResolveConfig with the updated ConfigVersion succeeds and authenticates with sshSrv2.
+	// 4. Positive control: ResolveConfig with the updated ConfigVersion succeeds, reads DB password, and authenticates with sshSrv2.
 	freshCtx, freshCarrier := withRuntimeSSHSecret(ctx, "secret-for-host-2", false)
 	freshCarrier.expectedCfgVer = initCfg.ConfigVersion + 1
 	freshCfg, err := connSvc.ResolveConfig(freshCtx, saved.ID, "demo")
 	if err != nil {
 		t.Fatalf("ResolveConfig with current expectedCfgVer failed: %v", err)
 	}
-	if freshCfg.ConfigVersion != initCfg.ConfigVersion+1 {
-		t.Fatalf("expected ConfigVersion=%d, got %d", initCfg.ConfigVersion+1, freshCfg.ConfigVersion)
+	if freshCfg.ConfigVersion != initCfg.ConfigVersion+1 || freshCfg.Password != "db-secret" {
+		t.Fatalf("expected ConfigVersion=%d and DB password, got ver=%d", initCfg.ConfigVersion+1, freshCfg.ConfigVersion)
 	}
 	if sshSrv2.connCount.Load() == 0 || sshSrv2.authAttempts.Load() == 0 {
 		t.Fatalf("expected fresh ResolveConfig to dial and authenticate with sshSrv2")

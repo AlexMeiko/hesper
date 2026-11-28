@@ -380,6 +380,7 @@ func (s *ChangeService) responseFromSnapshot(
 		resp := dto.ApplyGridChangesResponse{
 			PlanID:          snap.PlanID,
 			Outcome:         dto.GridApplyNotCommitted,
+			ConflictRowKey:  snap.Summary.ConflictRowKey,
 			Error:           appErr,
 			CredentialSaved: appErr.CredentialSaved,
 			SaveWarning:     appErr.SaveWarning,
@@ -390,9 +391,9 @@ func (s *ChangeService) responseFromSnapshot(
 
 // isRecoverablePreTxError strictly whitelists pre-transaction AcquireOperation failures that may
 // release Preparing -> Ready so the caller can retry the same planID:
-//   1. SSH host-key confirmation challenge (ErrTunnelFailed + HostKeyChallenge)
-//   2. SSH credential challenge (ErrAuthFailed + SSHAuthPrompt)
-//   3. Explicit transient dial timeout (context.DeadlineExceeded or net.Error.Timeout())
+//  1. SSH host-key confirmation challenge (ErrTunnelFailed + HostKeyChallenge)
+//  2. SSH credential challenge (ErrAuthFailed + SSHAuthPrompt)
+//  3. Explicit transient dial timeout (context.DeadlineExceeded or net.Error.Timeout())
 //
 // All other failures (missing SQLite file, non-timeout ErrConnectionFailed, SourceRef invalidation,
 // read-only denial, context.Canceled, session loss) finalize immediately to Finished(NotCommitted).
