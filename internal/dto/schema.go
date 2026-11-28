@@ -29,16 +29,22 @@ type ObjectSummary struct {
 
 // ColumnDetail describes a table column's structural metadata.
 type ColumnDetail struct {
-	Name          string `json:"name"`
-	DataType      string `json:"dataType"`
-	ColumnType    string `json:"columnType"`
-	Nullable      bool   `json:"nullable"`
-	IsPrimaryKey  bool   `json:"isPrimaryKey"`
-	DefaultValue  string `json:"defaultValue,omitempty"`
-	HasDefault    bool   `json:"hasDefault"`
-	AutoIncrement bool   `json:"autoIncrement"`
-	Comment       string `json:"comment,omitempty"`
-	OrdinalPos    int    `json:"ordinalPos"`
+	Name           string `json:"name"`
+	DataType       string `json:"dataType"`
+	ColumnType     string `json:"columnType"`
+	Collation      string `json:"collation,omitempty"`
+	Nullable       bool   `json:"nullable"`
+	IsPrimaryKey   bool   `json:"isPrimaryKey"`
+	DefaultValue   string `json:"defaultValue,omitempty"`
+	HasDefault     bool   `json:"hasDefault"`
+	AutoIncrement  bool   `json:"autoIncrement"`
+	GeneratedKind  string `json:"generatedKind,omitempty"`  // "" | "virtual" | "stored"
+	IdentityKind   string `json:"identityKind,omitempty"`   // "" | "always" | "by_default"
+	Insertable     bool   `json:"insertable"`
+	Updatable      bool   `json:"updatable"`
+	ReadOnlyReason string `json:"readOnlyReason,omitempty"`
+	Comment        string `json:"comment,omitempty"`
+	OrdinalPos     int    `json:"ordinalPos"`
 }
 
 // IndexDetail describes a table index.

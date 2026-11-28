@@ -501,58 +501,41 @@ func (c *Conn) ListSequences(ctx context.Context, db, _ string) ([]dto.ObjectSum
 }
 
 func (c *Conn) GetTableDetail(ctx context.Context, db, _, table string) (*dto.TableDetail, error) {
-	detail := &dto.TableDetail{
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
 		Database: db,
-		Name:     table,
-	}
-
-	// Table metadata (engine & comment)
-	_ = c.conn.QueryRowContext(ctx, `
-		SELECT COALESCE(ENGINE, ''), COALESCE(TABLE_COMMENT, '')
-		FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, db, table).Scan(&detail.Engine, &detail.Comment)
-
-	// Columns
-	colRows, err := c.conn.QueryContext(ctx, `
-		SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY,
-		       COLUMN_DEFAULT, EXTRA, COALESCE(COLUMN_COMMENT, ''), ORDINAL_POSITION
-		FROM information_schema.COLUMNS
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-		ORDER BY ORDINAL_POSITION`, db, table)
+		Table:    table,
+	}, c.readOnly)
 	if err != nil {
-		return nil, classifyMySQLError(err, false)
-	}
-	defer colRows.Close()
-
-	for colRows.Next() {
-		var col dto.ColumnDetail
-		var isNullable, colKey, extra string
-		var colDef sql.NullString
-		if err := colRows.Scan(
-			&col.Name, &col.DataType, &col.ColumnType, &isNullable, &colKey,
-			&colDef, &extra, &col.Comment, &col.OrdinalPos,
-		); err != nil {
-			return nil, err
-		}
-		col.Nullable = strings.EqualFold(isNullable, "YES")
-		col.IsPrimaryKey = strings.EqualFold(colKey, "PRI")
-		col.HasDefault = colDef.Valid
-		if colDef.Valid {
-			col.DefaultValue = colDef.String
-		}
-		col.AutoIncrement = strings.Contains(strings.ToLower(extra), "auto_increment")
-		detail.Columns = append(detail.Columns, col)
-	}
-	if err := colRows.Err(); err != nil {
 		return nil, err
 	}
 
-	// Indexes
+	var comment string
+	if err := c.conn.QueryRowContext(ctx, `
+		SELECT COALESCE(TABLE_COMMENT, '')
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, ws.Database, table).Scan(&comment); err != nil {
+		return nil, classifyMySQLError(err, false)
+	}
+
+	cols := make([]dto.ColumnDetail, len(ws.Columns))
+	for i, wc := range ws.Columns {
+		cols[i] = wc.Detail
+	}
+	detail := &dto.TableDetail{
+		Database:    ws.Database,
+		Name:        table,
+		Engine:      ws.StorageEngine,
+		Comment:     comment,
+		Columns:     cols,
+		Editability: ws.Editability,
+	}
+
+	// Indexes (use sql.NullString for COLUMN_NAME to avoid scan failure on MySQL 8.0+ functional indexes)
 	idxRows, err := c.conn.QueryContext(ctx, `
 		SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, COALESCE(INDEX_TYPE, '')
 		FROM information_schema.STATISTICS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-		ORDER BY INDEX_NAME, SEQ_IN_INDEX`, db, table)
+		ORDER BY INDEX_NAME, SEQ_IN_INDEX`, ws.Database, table)
 	if err != nil {
 		return nil, classifyMySQLError(err, false)
 	}
@@ -561,7 +544,8 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, _, table string) (*dto.Ta
 	idxMap := map[string]*dto.IndexDetail{}
 	var idxOrder []string
 	for idxRows.Next() {
-		var name, colName, idxType string
+		var name, idxType string
+		var colName sql.NullString
 		var nonUnique int
 		if err := idxRows.Scan(&name, &colName, &nonUnique, &idxType); err != nil {
 			return nil, err
@@ -577,15 +561,17 @@ func (c *Conn) GetTableDetail(ctx context.Context, db, _, table string) (*dto.Ta
 			idxMap[name] = idx
 			idxOrder = append(idxOrder, name)
 		}
-		idx.Columns = append(idx.Columns, colName)
+		if colName.Valid && colName.String != "" {
+			idx.Columns = append(idx.Columns, colName.String)
+		} else {
+			idx.Columns = append(idx.Columns, "(expression)")
+		}
+	}
+	if err := idxRows.Err(); err != nil {
+		return nil, classifyMySQLError(err, false)
 	}
 	for _, name := range idxOrder {
 		detail.Indexes = append(detail.Indexes, *idxMap[name])
-	}
-
-	edit, err := c.InspectTableEditability(ctx, db, "", table, c.readOnly)
-	if err == nil {
-		detail.Editability = edit
 	}
 	return detail, nil
 }
@@ -600,91 +586,16 @@ func (c *Conn) GetTableDDL(ctx context.Context, db, _, table string) (string, er
 }
 
 // InspectTableEditability computes 3-dimension editability (CanWrite, RowIdentity, BatchTransactional)
-// combining clientReadOnly flag, explicit primary/unique-not-null keys, and storage engine (InnoDB vs MyISAM).
+// using fail-closed InspectWriteSchema.
 func (c *Conn) InspectTableEditability(ctx context.Context, db, _, table string, clientReadOnly bool) (dto.TableEditability, error) {
-	edit := dto.TableEditability{
-		CanWrite:    !clientReadOnly,
-		RowIdentity: dto.RowIdentityNone,
-	}
-	if clientReadOnly {
-		edit.Reasons = append(edit.Reasons, "read_only_connection")
-	}
-
-	var engine string
-	if err := c.conn.QueryRowContext(ctx, `
-		SELECT COALESCE(ENGINE, '') FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, db, table).Scan(&engine); err == nil {
-		edit.StorageEngine = engine
-		edit.BatchTransactional = strings.EqualFold(engine, "InnoDB")
-		if engine != "" && !edit.BatchTransactional {
-			edit.Reasons = append(edit.Reasons, "non_transactional_engine:"+engine)
-		}
-	}
-
-	// Load column nullability map
-	nullableMap := map[string]bool{}
-	colRows, err := c.conn.QueryContext(ctx, `
-		SELECT COLUMN_NAME, IS_NULLABLE FROM information_schema.COLUMNS
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`, db, table)
-	if err == nil {
-		for colRows.Next() {
-			var cn, nul string
-			if colRows.Scan(&cn, &nul) == nil {
-				nullableMap[cn] = strings.EqualFold(nul, "YES")
-			}
-		}
-		_ = colRows.Close()
-	}
-
-	// Inspect PRIMARY and UNIQUE indexes
-	idxRows, err := c.conn.QueryContext(ctx, `
-		SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE
-		FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND NON_UNIQUE = 0
-		ORDER BY INDEX_NAME, SEQ_IN_INDEX`, db, table)
+	ws, err := c.InspectWriteSchema(ctx, driver.WriteTarget{
+		Database: db,
+		Table:    table,
+	}, clientReadOnly)
 	if err != nil {
-		return edit, classifyMySQLError(err, false)
+		return dto.TableEditability{}, err
 	}
-	defer idxRows.Close()
-
-	uniqueIdx := map[string][]string{}
-	var idxNames []string
-	for idxRows.Next() {
-		var idxName, colName string
-		var nonUnique int
-		if err := idxRows.Scan(&idxName, &colName, &nonUnique); err != nil {
-			return edit, err
-		}
-		if _, exists := uniqueIdx[idxName]; !exists {
-			idxNames = append(idxNames, idxName)
-		}
-		uniqueIdx[idxName] = append(uniqueIdx[idxName], colName)
-	}
-
-	if pkCols, ok := uniqueIdx["PRIMARY"]; ok && len(pkCols) > 0 {
-		edit.RowIdentity = dto.RowIdentityPrimaryKey
-		edit.KeyColumns = pkCols
-	} else {
-		for _, idxName := range idxNames {
-			cols := uniqueIdx[idxName]
-			allNotNull := len(cols) > 0
-			for _, cn := range cols {
-				if nullableMap[cn] {
-					allNotNull = false
-					break
-				}
-			}
-			if allNotNull {
-				edit.RowIdentity = dto.RowIdentityUniqueNotNull
-				edit.KeyColumns = cols
-				break
-			}
-		}
-	}
-	if edit.RowIdentity == dto.RowIdentityNone {
-		edit.Reasons = append(edit.Reasons, "no_stable_unique_key")
-	}
-	return edit, nil
+	return ws.Editability, nil
 }
 
 func (c *Conn) FetchCompletionCatalog(ctx context.Context, db, _ string) (*dto.CompletionCatalog, error) {
@@ -1053,15 +964,15 @@ func classifyMySQLError(err error, _ bool) *dto.AppError {
 	}
 	lower := strings.ToLower(err.Error())
 	if errors.Is(err, mysqldriver.ErrInvalidConn) || strings.Contains(lower, "bad connection") || strings.Contains(lower, "eof") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "broken pipe") {
-		return &dto.AppError{
+		return (&dto.AppError{
 			Code:    dto.ErrSessionLost,
 			Message: "数据库连接已断开，原会话已结束 (临时表与未提交事务已失效)",
 			Detail:  err.Error(),
-		}
+		}).WithCause(err)
 	}
-	return &dto.AppError{
+	return (&dto.AppError{
 		Code:    dto.ErrConnectionFailed,
 		Message: "数据库操作失败",
 		Detail:  err.Error(),
-	}
+	}).WithCause(err)
 }

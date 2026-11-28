@@ -21,11 +21,12 @@ const (
 // CellValue preserves exact string representation for precision-sensitive types and
 // strictly distinguishes NULL (Kind == KindNull) from empty string (Kind == KindString, Text == "").
 type CellValue struct {
-	Kind       ValueKind `json:"kind"`
-	Text       string    `json:"text,omitempty"`
-	Truncated  bool      `json:"truncated,omitempty"`
-	ByteLength int64     `json:"byteLength,omitempty"`
-	StreamRef  string    `json:"streamRef,omitempty"`
+	Kind         ValueKind `json:"kind"`
+	Text         string    `json:"text,omitempty"`
+	Truncated    bool      `json:"truncated,omitempty"`
+	ByteLength   int64     `json:"byteLength,omitempty"`
+	StreamRef    string    `json:"streamRef,omitempty"`
+	StorageClass string    `json:"storageClass,omitempty"` // SQLite typeof: null|integer|real|text|blob
 }
 
 // ColumnMeta describes one column in a query or browse result set.
