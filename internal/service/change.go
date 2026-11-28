@@ -213,10 +213,12 @@ func (s *ChangeService) applyGridChangesInternal(
 
 	// Bind explicit SSH credential persistence strictly to the plan's original ConfigVersion BEFORE
 	// acquiring the connection so edits to the connection/host after Preview never inherit the secret.
+	// Also skip saving when the connection's lifecycle epoch has already advanced (e.g. Disconnect
+	// after Preview) so stale plans never write secrets.
 	if carrier != nil {
 		carrier.expectedCfgVer = plan.Source.ConfigVersion
 	}
-	if s.prepareSSHSecret != nil {
+	if s.prepareSSHSecret != nil && s.sessMgr.CurrentLifecycleEpoch(req.ConnectionID) == plan.Source.LifecycleEpoch {
 		s.prepareSSHSecret(ctx, req.ConnectionID, carrier)
 	}
 

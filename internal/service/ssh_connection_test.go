@@ -972,6 +972,31 @@ func TestApplyGridChangesWithSSHSecretSkipsSaveWhenHostEditedAfterPreview(t *tes
 		t.Fatalf("expected cached Committed with CredentialSaved=false on replay, got resp=%+v err=%v", replayResp, err)
 	}
 	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "replayed finished plan MUST NOT persist SSH password")
+
+	// 6. Preview -> Disconnect (advances LifecycleEpoch without bumping ConfigVersion) -> Apply(saveSecret=true)
+	//    MUST reject with ErrPlanInvalidated AND MUST NOT save the SSH password!
+	prevDisc, err := changeSvc.PreviewGridChangesWithSSHSecret(ctx, dto.PreviewGridChangesRequest{
+		ConnectionID: saved.ID, Database: "demo", Table: "users",
+		Inserts: []dto.GridRowInsert{{RowKey: "ins-disc", Values: map[string]dto.NewCellValue{"name": {Mode: dto.CellInputLiteral, Text: "Carol"}}}},
+	}, "secret-for-host-2", false)
+	if err != nil {
+		t.Fatalf("Preview before Disconnect: %v", err)
+	}
+	connSvc.Disconnect(saved.ID)
+	discResp, err := changeSvc.ApplyGridChangesWithSSHSecret(ctx, dto.ApplyGridChangesRequest{
+		ConnectionID: saved.ID,
+		PlanID:       prevDisc.PlanID,
+	}, "secret-after-disconnect", true)
+	if err != nil {
+		t.Fatalf("expected terminal NotCommitted response after Disconnect, got err=%v", err)
+	}
+	if discResp.Outcome != dto.GridApplyNotCommitted || discResp.Error == nil || discResp.Error.Code != dto.ErrPlanInvalidated {
+		t.Fatalf("expected NotCommitted + ErrPlanInvalidated after Disconnect, got %+v", discResp)
+	}
+	if discResp.CredentialSaved {
+		t.Fatalf("stale-epoch plan after Disconnect MUST NOT report CredentialSaved=true")
+	}
+	assertSecret(t, secrets, sshPasswordRef(saved.ID), "", "stale-epoch plan after Disconnect MUST NOT persist SSH password")
 }
 
 func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
@@ -1067,5 +1092,68 @@ func TestResolveConfigRejectsStaleExpectedCfgVerBeforeDialingSSH(t *testing.T) {
 	}
 	if sshSrv2.connCount.Load() == 0 || sshSrv2.authAttempts.Load() == 0 {
 		t.Fatalf("expected fresh ResolveConfig to dial and authenticate with sshSrv2")
+	}
+}
+
+func TestResolveConfigAtomicHostPasswordSnapshot(t *testing.T) {
+	ctx := context.Background()
+	connSvc, _, _, _, _ := newTestSSHStack(t, true)
+
+	makeReq := func(id, host, pw string) dto.SaveConnectionRequest {
+		return dto.SaveConnectionRequest{
+			ID:             id,
+			Name:           "Atomic Host-Password Snapshot",
+			Driver:         dto.EngineMySQL,
+			EnvColor:       "green",
+			Password:       pw,
+			UpdatePassword: true,
+			Params: dto.ConnectionParams{
+				Host:            host,
+				Port:            3306,
+				Username:        "root",
+				DefaultDatabase: "demo",
+			},
+		}
+	}
+
+	saved, err := connSvc.SaveConnection(ctx, makeReq("", "host-a", "pw-a"))
+	if err != nil {
+		t.Fatalf("initial SaveConnection: %v", err)
+	}
+
+	done := make(chan struct{})
+	errCh := make(chan error, 2)
+	go func() {
+		defer close(done)
+		for i := 0; i < 60; i++ {
+			host, pw := "host-a", "pw-a"
+			if i%2 == 1 {
+				host, pw = "host-b", "pw-b"
+			}
+			if _, serr := connSvc.SaveConnection(ctx, makeReq(saved.ID, host, pw)); serr != nil {
+				errCh <- fmt.Errorf("SaveConnection(%s): %w", host, serr)
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-done:
+			select {
+			case serr := <-errCh:
+				t.Fatal(serr)
+			default:
+				return
+			}
+		default:
+			cfg, rerr := connSvc.ResolveConfig(ctx, saved.ID, "demo")
+			if rerr != nil {
+				t.Fatalf("ResolveConfig: %v", rerr)
+			}
+			if (cfg.Host == "host-a" && cfg.Password != "pw-a") || (cfg.Host == "host-b" && cfg.Password != "pw-b") {
+				t.Fatalf("ResolveConfig returned torn snapshot: host=%q password=%q ver=%d", cfg.Host, cfg.Password, cfg.ConfigVersion)
+			}
+		}
 	}
 }

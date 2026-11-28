@@ -92,30 +92,34 @@ func (s *ConnectionService) ResolveConfig(ctx context.Context, connID string, ov
 	s.cfgMu.RLock()
 	ent, err := s.repo.GetConnection(ctx, connID)
 	cfgVer := s.configVerLocked(connID)
-	s.cfgMu.RUnlock()
-
 	if err != nil {
+		s.cfgMu.RUnlock()
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "读取连接配置失败", err.Error())
 	}
 	if ent == nil {
+		s.cfgMu.RUnlock()
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrNotFound, "连接配置不存在", connID)
 	}
 	if carrier := runtimeSSHSecretFromContext(ctx); carrier != nil && carrier.expectedCfgVer > 0 && cfgVer != carrier.expectedCfgVer {
+		s.cfgMu.RUnlock()
 		// Connection config changed since the plan/challenge was created: reject BEFORE reading stored DB
 		// credentials or calling resolveSSHTunnel so stale plans never access secrets or dial an edited host.
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
 	}
+	var password string
+	if ent.SecretRef != "" && s.secrets != nil {
+		pw, serr := s.secrets.Get(ent.SecretRef)
+		if serr != nil {
+			s.cfgMu.RUnlock()
+			return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "读取连接凭据失败", serr.Error())
+		}
+		password = pw
+	}
+	s.cfgMu.RUnlock()
+
 	var params dto.ConnectionParams
 	if err := json.Unmarshal([]byte(ent.ConfigJSON), &params); err != nil {
 		return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "连接参数解析失败", err.Error())
-	}
-	var password string
-	if ent.SecretRef != "" && s.secrets != nil {
-		pw, err := s.secrets.Get(ent.SecretRef)
-		if err != nil {
-			return driver.ResolvedConfig{}, dto.NewAppError(dto.ErrInternal, "读取连接凭据失败", err.Error())
-		}
-		password = pw
 	}
 
 	var dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
