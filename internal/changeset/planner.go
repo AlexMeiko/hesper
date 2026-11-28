@@ -3,6 +3,7 @@ package changeset
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"hesper/internal/driver"
@@ -225,7 +226,7 @@ func BuildChangePlan(
 				return nil, nil, err
 			}
 
-			noop, err := isCellNoop(ws.Dialect, origVal, newVal, targetSC)
+			noop, err := isCellNoop(ws.Dialect, origVal, newVal, boundVal, targetSC)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -395,7 +396,7 @@ func BuildChangePlan(
 
 // isCellNoop reports whether a requested cell update equals the original read-time fact,
 // distinguishing NULL vs empty string "" and SQLite storage classes accurately.
-func isCellNoop(dialect dto.EngineType, orig dto.OriginalCellValue, newVal dto.NewCellValue, sqliteTargetSC string) (bool, error) {
+func isCellNoop(dialect dto.EngineType, orig dto.OriginalCellValue, newVal dto.NewCellValue, boundVal any, sqliteTargetSC string) (bool, error) {
 	if newVal.Mode == dto.CellInputNull {
 		if orig.Kind != dto.KindNull {
 			return false, nil
@@ -421,7 +422,17 @@ func isCellNoop(dialect dto.EngineType, orig dto.OriginalCellValue, newVal dto.N
 		if err != nil {
 			return false, err
 		}
-		return orig.Text == newVal.Text && origSC == sqliteTargetSC, nil
+		if origSC != sqliteTargetSC {
+			return false, nil
+		}
+		if origSC == "integer" {
+			if origInt, err := strconv.ParseInt(trimSQLiteWhitespace(orig.Text), 10, 64); err == nil {
+				if newInt, ok := boundVal.(int64); ok {
+					return origInt == newInt, nil
+				}
+			}
+		}
+		return orig.Text == newVal.Text, nil
 	}
 	return orig.Text == newVal.Text, nil
 }

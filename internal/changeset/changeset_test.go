@@ -1107,24 +1107,31 @@ func TestPlanStoreReleaseToReadyEnforcesTTLAndCapacity(t *testing.T) {
 		now = now.Add(time.Second)
 		idB := store.Create(&changeset.ChangePlan{Source: changeset.SourceRef{ConnectionID: "c1"}})
 
-		// Release A back to Ready: cap=1 MUST evict oldest Ready so only 1 Ready plan remains!
+		// Release A back to Ready at t=2 (newer updatedAt than idle B created at t=1):
+		// LRU eviction (updatedAt first) MUST keep actively-retrying A and evict idle B!
 		now = now.Add(time.Second)
 		okA := store.ReleaseToReady(idA)
 		stA, _, exA := store.StateOf(idA)
 		stB, _, exB := store.StateOf(idB)
 
-		readyCount := 0
-		if exA && stA == changeset.PlanReady {
-			readyCount++
+		if !okA || !exA || stA != changeset.PlanReady || exB {
+			t.Fatalf("expected LRU eviction to keep more recently updated plan A (okA=true, PlanReady) and evict idle B, got okA=%v A(ex=%v st=%s) B(ex=%v st=%s)",
+				okA, exA, stA, exB, stB)
 		}
-		if exB && stB == changeset.PlanReady {
-			readyCount++
+
+		// Tie-breaker: when updatedAt is equal, older createdAt (A) is evicted and newer B survives (okA=false)!
+		if _, _, err := store.ReserveForApply(idA, "c1"); err != nil {
+			t.Fatalf("ReserveForApply A second time: %v", err)
 		}
-		if readyCount != 1 {
-			t.Fatalf("expected exactly 1 Ready plan under MaxReadyPlans=1, got A(ex=%v st=%s) B(ex=%v st=%s)", exA, stA, exB, stB)
-		}
-		if okA != (exA && stA == changeset.PlanReady) {
-			t.Fatalf("ReleaseToReady bool (%v) did not match A survival (%v/%s)", okA, exA, stA)
+		now = now.Add(time.Second)
+		idC := store.Create(&changeset.ChangePlan{Source: changeset.SourceRef{ConnectionID: "c1"}})
+		// Same timestamp `now` -> A.updatedAt == C.updatedAt, A.createdAt < C.createdAt -> A MUST be evicted.
+		okA2 := store.ReleaseToReady(idA)
+		stA2, _, exA2 := store.StateOf(idA)
+		stC, _, exC := store.StateOf(idC)
+		if okA2 || exA2 || !exC || stC != changeset.PlanReady {
+			t.Fatalf("expected createdAt tie-breaker to evict older plan A (okA2=false, exA2=false) and keep newer C (PlanReady), got okA2=%v A(ex=%v st=%s) C(ex=%v st=%s)",
+				okA2, exA2, stA2, exC, stC)
 		}
 	})
 }
@@ -1214,9 +1221,44 @@ func TestSQLiteFormFeedAndVerticalTabNumericWhitespace(t *testing.T) {
 	if v, ok := args[2].(float64); !ok || v != 0.5 {
 		t.Fatalf("expected real_col=float64(0.5), got %T(%v)", args[2], args[2])
 	}
+
+	// SQLite NUMERIC affinity: exact integral literal "42.0" binds as int64(42) with "integer" storage class
+	// (so editing existing integer 42 -> "42.0" is detected as a no-op), while "0.25" stays float64/"real".
+	noopPlan, _, err := changeset.BuildChangePlan(src, ws, dto.PreviewGridChangesRequest{
+		ConnectionID: "sq-1", Database: "main", Table: "t_ws",
+		Updates: []dto.GridRowUpdate{{
+			RowKey:         "noop-numeric-int",
+			KeyValues:      map[string]dto.OriginalCellValue{"id": {Kind: dto.KindInt, Text: "7", StorageClass: "integer"}},
+			OriginalValues: map[string]dto.OriginalCellValue{"num_col": {Kind: dto.KindInt, Text: "42", StorageClass: "integer"}},
+			NewValues:      map[string]dto.NewCellValue{"num_col": {Mode: dto.CellInputLiteral, Text: "42.0"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildChangePlan NUMERIC 42 -> 42.0: %v", err)
+	}
+	if len(noopPlan.Steps) != 0 {
+		t.Fatalf("expected NUMERIC 42 (integer) -> 42.0 to be classified as no-op, got %d steps", len(noopPlan.Steps))
+	}
+
+	fracPlan, _, err := changeset.BuildChangePlan(src, ws, dto.PreviewGridChangesRequest{
+		ConnectionID: "sq-1", Database: "main", Table: "t_ws",
+		Inserts: []dto.GridRowInsert{{
+			RowKey: "ins-numeric-frac",
+			Values: map[string]dto.NewCellValue{
+				"id":      {Mode: dto.CellInputLiteral, Text: "8"},
+				"num_col": {Mode: dto.CellInputLiteral, Text: "0.25"},
+			},
+		}},
+	})
+	if err != nil || len(fracPlan.Steps) != 1 {
+		t.Fatalf("BuildChangePlan NUMERIC 0.25: %v", err)
+	}
+	if v, ok := fracPlan.Steps[0].Stmt.Args[1].(float64); !ok || v != 0.25 {
+		t.Fatalf("expected NUMERIC 0.25 to bind as float64(0.25), got %T(%v)", fracPlan.Steps[0].Stmt.Args[1], fracPlan.Steps[0].Stmt.Args[1])
+	}
 }
 
-func TestSchemaFingerprintDetectsTableDefinitionChange(t *testing.T) {
+func TestSchemaFingerprintDetectsTableDefinitionAndGenerationExpressionChanges(t *testing.T) {
 	ws1 := driver.WriteSchema{
 		Dialect:         dto.EngineSQLite,
 		Database:        "main",
@@ -1228,5 +1270,24 @@ func TestSchemaFingerprintDetectsTableDefinitionChange(t *testing.T) {
 
 	if changeset.ComputeSchemaFingerprint(ws1) == changeset.ComputeSchemaFingerprint(ws2) {
 		t.Fatalf("expected SchemaFingerprint to change when SQLite generated expression TableDefinition changes")
+	}
+
+	my1 := driver.WriteSchema{
+		Dialect:  dto.EngineMySQL,
+		Database: "app",
+		Table:    "t_gen",
+		Columns: []driver.WriteColumn{
+			{
+				Detail:               dto.ColumnDetail{Name: "g", DataType: "int", ColumnType: "int", GeneratedKind: "virtual", OrdinalPos: 1},
+				NativeType:           "int",
+				GenerationExpression: "(`qty` * 2)",
+			},
+		},
+	}
+	my2 := my1
+	my2.Columns = append([]driver.WriteColumn(nil), my1.Columns...)
+	my2.Columns[0].GenerationExpression = "(`qty` * 3)"
+	if changeset.ComputeSchemaFingerprint(my1) == changeset.ComputeSchemaFingerprint(my2) {
+		t.Fatalf("expected SchemaFingerprint to change when MySQL GenerationExpression changes")
 	}
 }

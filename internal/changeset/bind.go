@@ -252,6 +252,11 @@ func bindNewValue(dialect dto.EngineType, col driver.WriteColumn, val dto.NewCel
 				"",
 			)
 		}
+		// SQLite NUMERIC affinity stores exact integral floating-point values that fit in int64
+		// (e.g. 42.0, 1e2) with INTEGER storage class rather than REAL.
+		if rIn, okIn := new(big.Rat).SetString(trimmed); okIn && rIn.IsInt() && rIn.Num().IsInt64() {
+			return rIn.Num().Int64(), "integer", nil
+		}
 		return f, "real", nil
 	}
 }

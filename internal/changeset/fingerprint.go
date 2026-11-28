@@ -27,29 +27,30 @@ type schemaFingerprintPayload struct {
 }
 
 type columnFingerprintRecord struct {
-	Name            string                 `json:"name"`
-	NativeType      string                 `json:"nativeType"`
-	ColumnType      string                 `json:"columnType"`
-	Collation       string                 `json:"collation"`
-	Deterministic   bool                   `json:"deterministic"`
-	SQLiteAffinity  string                 `json:"sqliteAffinity"`
-	Nullable        bool                   `json:"nullable"`
-	HasDefault      bool                   `json:"hasDefault"`
-	DefaultValue    string                 `json:"defaultValue"`
-	AutoIncrement   bool                   `json:"autoIncrement"`
-	GeneratedKind   string                 `json:"generatedKind"`
-	IdentityKind    string                 `json:"identityKind"`
-	Insertable      bool                   `json:"insertable"`
-	Updatable       bool                   `json:"updatable"`
-	CompareStrategy driver.CompareStrategy `json:"compareStrategy"`
-	KeyComparable   bool                   `json:"keyComparable"`
+	Name                 string                 `json:"name"`
+	NativeType           string                 `json:"nativeType"`
+	ColumnType           string                 `json:"columnType"`
+	Collation            string                 `json:"collation"`
+	Deterministic        bool                   `json:"deterministic"`
+	SQLiteAffinity       string                 `json:"sqliteAffinity"`
+	Nullable             bool                   `json:"nullable"`
+	HasDefault           bool                   `json:"hasDefault"`
+	DefaultValue         string                 `json:"defaultValue"`
+	AutoIncrement        bool                   `json:"autoIncrement"`
+	GeneratedKind        string                 `json:"generatedKind"`
+	GenerationExpression string                 `json:"generationExpression"`
+	IdentityKind         string                 `json:"identityKind"`
+	Insertable           bool                   `json:"insertable"`
+	Updatable            bool                   `json:"updatable"`
+	CompareStrategy      driver.CompareStrategy `json:"compareStrategy"`
+	KeyComparable        bool                   `json:"keyComparable"`
 }
 
 // ComputeSchemaFingerprint computes a deterministic SHA-256 hex digest over every table and
 // column write-semantic attribute, including full Detail.ColumnType (e.g. MySQL DECIMAL(38,10)
 // vs DECIMAL(38,2), VARCHAR length, UNSIGNED), HasDefault, DefaultValue, AutoIncrement,
-// GeneratedKind, IdentityKind, Collation, Deterministic, SQLiteAffinity, WithoutRowID, Strict,
-// TableDefinition (e.g. SQLite generated column expressions / table DDL), CompareStrategy, and KeyComparable.
+// GeneratedKind, GenerationExpression, IdentityKind, Collation, Deterministic, SQLiteAffinity,
+// WithoutRowID, Strict, TableDefinition, CompareStrategy, and KeyComparable.
 func ComputeSchemaFingerprint(ws driver.WriteSchema) string {
 	cols := make([]driver.WriteColumn, len(ws.Columns))
 	copy(cols, ws.Columns)
@@ -63,22 +64,23 @@ func ComputeSchemaFingerprint(ws driver.WriteSchema) string {
 	colRecords := make([]columnFingerprintRecord, len(cols))
 	for i, c := range cols {
 		colRecords[i] = columnFingerprintRecord{
-			Name:            c.Detail.Name,
-			NativeType:      c.NativeType,
-			ColumnType:      c.Detail.ColumnType,
-			Collation:       c.Collation,
-			Deterministic:   c.Deterministic,
-			SQLiteAffinity:  c.SQLiteAffinity,
-			Nullable:        c.Detail.Nullable,
-			HasDefault:      c.Detail.HasDefault,
-			DefaultValue:    c.Detail.DefaultValue,
-			AutoIncrement:   c.Detail.AutoIncrement,
-			GeneratedKind:   c.Detail.GeneratedKind,
-			IdentityKind:    c.Detail.IdentityKind,
-			Insertable:      c.Detail.Insertable,
-			Updatable:       c.Detail.Updatable,
-			CompareStrategy: c.CompareStrategy,
-			KeyComparable:   c.KeyComparable,
+			Name:                 c.Detail.Name,
+			NativeType:           c.NativeType,
+			ColumnType:           c.Detail.ColumnType,
+			Collation:            c.Collation,
+			Deterministic:        c.Deterministic,
+			SQLiteAffinity:       c.SQLiteAffinity,
+			Nullable:             c.Detail.Nullable,
+			HasDefault:           c.Detail.HasDefault,
+			DefaultValue:         c.Detail.DefaultValue,
+			AutoIncrement:        c.Detail.AutoIncrement,
+			GeneratedKind:        c.Detail.GeneratedKind,
+			GenerationExpression: c.GenerationExpression,
+			IdentityKind:         c.Detail.IdentityKind,
+			Insertable:           c.Detail.Insertable,
+			Updatable:            c.Detail.Updatable,
+			CompareStrategy:      c.CompareStrategy,
+			KeyComparable:        c.KeyComparable,
 		}
 	}
 
