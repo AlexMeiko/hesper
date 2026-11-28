@@ -180,13 +180,14 @@ const (
 // WriteColumn combines UI-facing ColumnDetail with backend-only native metadata needed
 // for accurate binding, comparison predicate generation, and schema fingerprinting.
 type WriteColumn struct {
-	Detail          dto.ColumnDetail
-	NativeType      string // PG format_type / MySQL DATA_TYPE / SQLite declared type
-	Collation       string
-	Deterministic   bool   // PG pg_collation.collisdeterministic (defaults to true)
-	SQLiteAffinity  string // integer | text | blob | real | numeric
-	CompareStrategy CompareStrategy
-	KeyComparable   bool // whether this column may participate as a stable key in WHERE
+	Detail               dto.ColumnDetail
+	NativeType           string // PG format_type / MySQL DATA_TYPE / SQLite declared type
+	Collation            string
+	Deterministic        bool   // PG pg_collation.collisdeterministic (defaults to true)
+	SQLiteAffinity       string // integer | text | blob | real | numeric
+	GenerationExpression string // MySQL/MariaDB information_schema.COLUMNS.GENERATION_EXPRESSION
+	CompareStrategy      CompareStrategy
+	KeyComparable        bool // whether this column may participate as a stable key in WHERE
 }
 
 // WriteSchema is the authoritative backend table schema snapshot shared identically

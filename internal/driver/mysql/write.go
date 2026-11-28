@@ -35,6 +35,10 @@ func (c *Conn) BeginTableWrite(ctx context.Context, target driver.WriteTarget, c
 		return nil, dto.NewAppError(dto.ErrInvalidArgument, "数据库与表名不能为空", "")
 	}
 
+	if err := c.ensureWriteNoteDiagnostics(ctx); err != nil {
+		return nil, err
+	}
+
 	tx, err := c.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, classifyMySQLError(err, false)
@@ -89,6 +93,30 @@ func (c *Conn) BeginTableWrite(ctx context.Context, target driver.WriteTarget, c
 	}, nil
 }
 
+// ensureWriteNoteDiagnostics enables Note-level diagnostics on this dedicated write connection
+// so strict-mode fractional DECIMAL scale rounding (Note 1265) is always recorded in
+// SHOW COUNT(*) WARNINGS even if the server defaults to sql_notes=0 or (on MariaDB 11+)
+// note_verbosity=”. Runs before opening the write transaction and fails closed on any error
+// except ER_UNKNOWN_SYSTEM_VARIABLE (1193) for older MariaDB releases without note_verbosity.
+func (c *Conn) ensureWriteNoteDiagnostics(ctx context.Context) error {
+	if _, err := c.conn.ExecContext(ctx, "SET SESSION sql_notes = 1"); err != nil {
+		return classifyMySQLError(err, false)
+	}
+	if c.detectedType == dto.EngineMariaDB {
+		if _, err := c.conn.ExecContext(ctx, "SET SESSION note_verbosity = 'basic'"); err != nil {
+			if !isMySQLUnknownSystemVariable(err) {
+				return classifyMySQLError(err, false)
+			}
+		}
+	}
+	return nil
+}
+
+func isMySQLUnknownSystemVariable(err error) bool {
+	var me *mysqldriver.MySQLError
+	return errors.As(err, &me) && me.Number == 1193
+}
+
 func (c *Conn) resolveTargetDB(db string) string {
 	if db != "" {
 		return db
@@ -135,10 +163,11 @@ func (c *Conn) inspectWriteSchema(ctx context.Context, q sqlQuerier, target driv
 		edit.Reasons = append(edit.Reasons, "non_transactional_engine:"+engine)
 	}
 
-	// 2. Fail-closed columns read (including COLLATION_NAME and EXTRA for generated/auto_increment columns).
+	// 2. Fail-closed columns read (including COLLATION_NAME, EXTRA, and GENERATION_EXPRESSION).
 	colRows, err := q.QueryContext(ctx, `
 		SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY,
-		       COLUMN_DEFAULT, EXTRA, COALESCE(COLLATION_NAME, ''), COALESCE(COLUMN_COMMENT, ''), ORDINAL_POSITION
+		       COLUMN_DEFAULT, EXTRA, COALESCE(COLLATION_NAME, ''), COALESCE(COLUMN_COMMENT, ''),
+		       COALESCE(GENERATION_EXPRESSION, ''), ORDINAL_POSITION
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION`, dbName, target.Table)
@@ -154,13 +183,13 @@ func (c *Conn) inspectWriteSchema(ctx context.Context, q sqlQuerier, target driv
 
 	for colRows.Next() {
 		var (
-			name, dataType, colType, isNullable, colKey, extra, collation, comment string
-			colDef                                                                 sql.NullString
-			ordPos                                                                 int
+			name, dataType, colType, isNullable, colKey, extra, collation, comment, genExpr string
+			colDef                                                                          sql.NullString
+			ordPos                                                                          int
 		)
 		if err := colRows.Scan(
 			&name, &dataType, &colType, &isNullable, &colKey,
-			&colDef, &extra, &collation, &comment, &ordPos,
+			&colDef, &extra, &collation, &comment, &genExpr, &ordPos,
 		); err != nil {
 			return driver.WriteSchema{}, err
 		}
@@ -168,7 +197,7 @@ func (c *Conn) inspectWriteSchema(ctx context.Context, q sqlQuerier, target driv
 		nullable := !strings.EqualFold(isNullable, "NO")
 		notNullMap[name] = !nullable
 
-		wc := buildMySQLWriteColumn(c.detectedType, name, dataType, colType, nullable, strings.EqualFold(colKey, "PRI"), colDef, extra, collation, comment, ordPos)
+		wc := buildMySQLWriteColumn(c.detectedType, name, dataType, colType, nullable, strings.EqualFold(colKey, "PRI"), colDef, extra, collation, comment, genExpr, ordPos)
 		writeCols = append(writeCols, wc)
 		colByName[name] = wc
 	}
@@ -277,7 +306,7 @@ func buildMySQLWriteColumn(
 	name, dataType, colType string,
 	nullable, isPK bool,
 	colDef sql.NullString,
-	extra, collation, comment string,
+	extra, collation, comment, genExpr string,
 	ordPos int,
 ) driver.WriteColumn {
 	extraLow := strings.ToLower(extra)
@@ -320,11 +349,12 @@ func buildMySQLWriteColumn(
 			Comment:        comment,
 			OrdinalPos:     ordPos,
 		},
-		NativeType:      strings.ToLower(dataType),
-		Collation:       collation,
-		Deterministic:   true,
-		CompareStrategy: strategy,
-		KeyComparable:   keyComparable,
+		NativeType:           strings.ToLower(dataType),
+		Collation:            collation,
+		Deterministic:        true,
+		GenerationExpression: genExpr,
+		CompareStrategy:      strategy,
+		KeyComparable:        keyComparable,
 	}
 }
 
@@ -413,17 +443,28 @@ func (t *mysqlTableWriteTx) Exec(ctx context.Context, stmt driver.BoundStatement
 	}, nil
 }
 
-// checkDataLossWarnings inspects SHOW WARNINGS on the same transaction right after DML so
-// non-strict sql_mode truncation (e.g. VARCHAR(3) <- 'abcd', integer clamping, invalid date
-// coercion) and strict-mode fractional DECIMAL scale truncation (1265) are rejected before COMMIT.
+// checkDataLossWarnings inspects SHOW COUNT(*) WARNINGS (which does not clear diagnostics) and
+// SHOW WARNINGS on the same transaction right after DML so non-strict sql_mode truncation
+// (including sessions with max_error_count=0 where details are omitted) and strict-mode
+// fractional DECIMAL scale truncation (Note 1265) are rejected before COMMIT.
 func (t *mysqlTableWriteTx) checkDataLossWarnings(ctx context.Context) error {
+	var warningCount int
+	if err := t.tx.QueryRowContext(ctx, "SHOW COUNT(*) WARNINGS").Scan(&warningCount); err != nil {
+		return classifyMySQLError(err, true)
+	}
+	if warningCount <= 0 {
+		return nil
+	}
+
 	rows, err := t.tx.QueryContext(ctx, "SHOW WARNINGS")
 	if err != nil {
 		return classifyMySQLError(err, true)
 	}
 	defer rows.Close()
 
+	seenRows := 0
 	for rows.Next() {
+		seenRows++
 		var level string
 		var code int
 		var msg string
@@ -440,6 +481,13 @@ func (t *mysqlTableWriteTx) checkDataLossWarnings(ctx context.Context) error {
 	}
 	if err := rows.Err(); err != nil {
 		return classifyMySQLError(err, true)
+	}
+	if seenRows < warningCount {
+		return dto.NewAppError(
+			dto.ErrInvalidArgument,
+			fmt.Sprintf("MySQL 产生了 %d 条写入告警，但仅返回了 %d 条诊断明细，无法确认未发生截断，已中止提交并回滚", warningCount, seenRows),
+			fmt.Sprintf("SHOW COUNT(*) WARNINGS=%d, SHOW WARNINGS rows=%d", warningCount, seenRows),
+		)
 	}
 	return nil
 }

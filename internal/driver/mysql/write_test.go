@@ -275,3 +275,108 @@ func TestIsMySQLDataLossWarning(t *testing.T) {
 		}
 	}
 }
+
+type execStubConnector struct {
+	execFn func(query string) error
+}
+
+func (c *execStubConnector) Connect(context.Context) (sqldriver.Conn, error) {
+	return &execStubConn{execFn: c.execFn}, nil
+}
+func (c *execStubConnector) Driver() sqldriver.Driver { return nil }
+
+type execStubConn struct {
+	execFn func(query string) error
+}
+
+func (c *execStubConn) Prepare(string) (sqldriver.Stmt, error) { return nil, errors.New("unused") }
+func (c *execStubConn) Close() error                           { return nil }
+func (c *execStubConn) Begin() (sqldriver.Tx, error)           { return nil, errors.New("unused") }
+func (c *execStubConn) ExecContext(_ context.Context, query string, _ []sqldriver.NamedValue) (sqldriver.Result, error) {
+	if c.execFn != nil {
+		if err := c.execFn(query); err != nil {
+			return nil, err
+		}
+	}
+	return sqldriver.RowsAffected(0), nil
+}
+
+func TestEnsureWriteNoteDiagnostics(t *testing.T) {
+	newConn := func(t *testing.T, engine dto.EngineType, execFn func(string) error) *Conn {
+		t.Helper()
+		db := sql.OpenDB(&execStubConnector{execFn: execFn})
+		t.Cleanup(func() { _ = db.Close() })
+		sqlConn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("db.Conn: %v", err)
+		}
+		t.Cleanup(func() { _ = sqlConn.Close() })
+		return &Conn{db: db, conn: sqlConn, detectedType: engine}
+	}
+
+	t.Run("MySQL sets sql_notes=1 only and skips note_verbosity", func(t *testing.T) {
+		var queries []string
+		c := newConn(t, dto.EngineMySQL, func(q string) error {
+			queries = append(queries, q)
+			return nil
+		})
+		if err := c.ensureWriteNoteDiagnostics(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(queries) != 1 || queries[0] != "SET SESSION sql_notes = 1" {
+			t.Fatalf("unexpected queries for MySQL: %v", queries)
+		}
+	})
+
+	t.Run("MariaDB 11+ sets both sql_notes=1 and note_verbosity='basic'", func(t *testing.T) {
+		var queries []string
+		c := newConn(t, dto.EngineMariaDB, func(q string) error {
+			queries = append(queries, q)
+			return nil
+		})
+		if err := c.ensureWriteNoteDiagnostics(context.Background()); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(queries) != 2 || queries[0] != "SET SESSION sql_notes = 1" || queries[1] != "SET SESSION note_verbosity = 'basic'" {
+			t.Fatalf("unexpected queries for MariaDB: %v", queries)
+		}
+	})
+
+	t.Run("Older MariaDB without note_verbosity (1193) succeeds", func(t *testing.T) {
+		c := newConn(t, dto.EngineMariaDB, func(q string) error {
+			if strings.Contains(q, "note_verbosity") {
+				return makeMySQLErr(1193, "HY000", "Unknown system variable 'note_verbosity'")
+			}
+			return nil
+		})
+		if err := c.ensureWriteNoteDiagnostics(context.Background()); err != nil {
+			t.Fatalf("expected ER_UNKNOWN_SYSTEM_VARIABLE (1193) to be ignored on older MariaDB, got %v", err)
+		}
+	})
+
+	t.Run("MariaDB non-1193 error on note_verbosity aborts", func(t *testing.T) {
+		c := newConn(t, dto.EngineMariaDB, func(q string) error {
+			if strings.Contains(q, "note_verbosity") {
+				return makeMySQLErr(2006, "HY000", "MySQL server has gone away")
+			}
+			return nil
+		})
+		if err := c.ensureWriteNoteDiagnostics(context.Background()); err == nil {
+			t.Fatalf("expected non-1193 error on note_verbosity to abort")
+		}
+	})
+
+	t.Run("sql_notes=1 failure aborts before note_verbosity", func(t *testing.T) {
+		var queries []string
+		c := newConn(t, dto.EngineMariaDB, func(q string) error {
+			queries = append(queries, q)
+			return makeMySQLErr(2006, "HY000", "MySQL server has gone away")
+		})
+		if err := c.ensureWriteNoteDiagnostics(context.Background()); err == nil {
+			t.Fatalf("expected sql_notes=1 failure to abort")
+		}
+		if len(queries) != 1 {
+			t.Fatalf("expected abort after sql_notes=1 failure, got queries=%v", queries)
+		}
+	})
+}
