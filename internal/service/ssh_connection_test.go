@@ -1177,3 +1177,60 @@ func TestResolveConfigAtomicHostPasswordSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSSHTunnelRejectsStaleCfgVerBeforeReadingStoredSecret(t *testing.T) {
+	ctx := context.Background()
+	connSvc, _, secrets, _, _ := newTestSSHStack(t, true)
+
+	sshSrv1 := startMiniSSHServer(t, "pw-for-host-1")
+	sshSrv2 := startMiniSSHServer(t, "pw-for-host-2")
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv1.host, sshSrv1.port), sshSrv1.algorithm, sshSrv1.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv1: %v", err)
+	}
+	if err := connSvc.TrustSSHHostKey(ctx, tunnel.NormalizeHostPort(sshSrv2.host, sshSrv2.port), sshSrv2.algorithm, sshSrv2.fingerprint); err != nil {
+		t.Fatalf("trust sshSrv2: %v", err)
+	}
+
+	// 1. Save connection targeting sshSrv1 with stored SSH password.
+	req1 := sshMySQLReq("", "stale-ssh-secret-read", sshSrv1.host, sshSrv1.port, true, withSSHPass("pw-for-host-1"))
+	saved, err := connSvc.SaveConnection(ctx, req1)
+	if err != nil {
+		t.Fatalf("SaveConnection #1: %v", err)
+	}
+	connSvc.cfgMu.RLock()
+	oldVer := connSvc.configVerLocked(saved.ID)
+	connSvc.cfgMu.RUnlock()
+	oldParams := saved.Params
+
+	// 2. Edit connection to sshSrv2 with a new stored SSH password (bumps cfgVer).
+	req2 := sshMySQLReq(saved.ID, "stale-ssh-secret-read", sshSrv2.host, sshSrv2.port, true, withSSHPass("pw-for-host-2"))
+	if _, err := connSvc.SaveConnection(ctx, req2); err != nil {
+		t.Fatalf("SaveConnection #2: %v", err)
+	}
+
+	// 3. Call resolveSSHTunnel with the stale (oldParams, oldVer) snapshot: MUST reject under cfgMu.RLock()
+	//    BEFORE reading the new stored SSH secret or dialing sshSrv1!
+	getsBefore := secrets.getCount.Load()
+	_, _, rerr := connSvc.resolveSSHTunnel(ctx, saved.ID, oldVer, oldParams)
+	var appErr *dto.AppError
+	if !errors.As(rerr, &appErr) || appErr.Code != dto.ErrTunnelFailed {
+		t.Fatalf("expected ErrTunnelFailed for stale resolveSSHTunnel without expectedCfgVer, got %v", rerr)
+	}
+	if secrets.getCount.Load() != getsBefore {
+		t.Fatalf("stale resolveSSHTunnel MUST NOT read stored SSH secret (gets before=%d after=%d)", getsBefore, secrets.getCount.Load())
+	}
+	if sshSrv1.connCount.Load() != 0 || sshSrv1.authAttempts.Load() != 0 {
+		t.Fatalf("stale resolveSSHTunnel MUST NOT dial old endpoint sshSrv1, got connCount=%d authAttempts=%d",
+			sshSrv1.connCount.Load(), sshSrv1.authAttempts.Load())
+	}
+
+	// 4. With expectedConfigVersion in ctx (ApplyGridChanges path), stale version returns ErrPlanInvalidated.
+	getsBefore = secrets.getCount.Load()
+	_, _, perr := connSvc.resolveSSHTunnel(withExpectedConfigVersion(ctx, oldVer), saved.ID, oldVer, oldParams)
+	if !errors.As(perr, &appErr) || appErr.Code != dto.ErrPlanInvalidated {
+		t.Fatalf("expected ErrPlanInvalidated for stale resolveSSHTunnel with expectedCfgVer, got %v", perr)
+	}
+	if secrets.getCount.Load() != getsBefore {
+		t.Fatalf("stale plan resolveSSHTunnel MUST NOT read stored SSH secret (gets before=%d after=%d)", getsBefore, secrets.getCount.Load())
+	}
+}

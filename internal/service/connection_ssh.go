@@ -129,23 +129,29 @@ func (s *ConnectionService) resolveSSHTunnel(
 
 	// 3. No live tunnel -> resolve credentials with unified priority:
 	//    (1) explicit runtime secret from ctx, (2) stored secret from secret.Store.
+	//    When loading a stored secret, acquire cfgMu.RLock() and verify configVerLocked(connID)==cfgVer
+	//    so a concurrent SaveConnection can never pair a newly saved SSH secret with an older endpoint.
 	sshCfg := baseCfg
 	switch authMethod {
 	case "password":
 		if carrier != nil && carrier.secret != "" {
 			sshCfg.Password = carrier.secret
 		} else if s.secrets != nil {
-			if stored, serr := s.secrets.Get(sshPasswordRef(connID)); serr == nil {
-				sshCfg.Password = stored
+			stored, serr := s.readStoredSSHSecretForVersion(ctx, connID, cfgVer, sshPasswordRef(connID), sshCfg, carrier)
+			if serr != nil {
+				return nil, 0, serr
 			}
+			sshCfg.Password = stored
 		}
 	case "key":
 		if carrier != nil && carrier.secret != "" {
 			sshCfg.Passphrase = carrier.secret
 		} else if s.secrets != nil {
-			if stored, serr := s.secrets.Get(sshPassphraseRef(connID)); serr == nil {
-				sshCfg.Passphrase = stored
+			stored, serr := s.readStoredSSHSecretForVersion(ctx, connID, cfgVer, sshPassphraseRef(connID), sshCfg, carrier)
+			if serr != nil {
+				return nil, 0, serr
 			}
+			sshCfg.Passphrase = stored
 		}
 	}
 
@@ -156,6 +162,38 @@ func (s *ConnectionService) resolveSSHTunnel(
 		return nil, 0, appErr
 	}
 	return dialFn, gen, nil
+}
+
+// readStoredSSHSecretForVersion reads a stored SSH password/passphrase while holding cfgMu.RLock()
+// and re-checking configVerLocked(connID) == cfgVer so concurrent SaveConnection/DeleteConnection
+// cannot pair a newer credential with an older SSH endpoint snapshot.
+func (s *ConnectionService) readStoredSSHSecretForVersion(
+	ctx context.Context,
+	connID string,
+	cfgVer uint64,
+	secretRef string,
+	sshCfg tunnel.SSHConfig,
+	carrier *runtimeSSHSecret,
+) (string, error) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+
+	if s.configVerLocked(connID) != cfgVer {
+		if expectedConfigVersionFromContext(ctx) > 0 {
+			appErr := dto.NewAppError(dto.ErrPlanInvalidated, "连接配置已变更，当前变更计划已失效，请重新预览", "")
+			attachSaveOutcomeToError(appErr, carrier)
+			return "", appErr
+		}
+		appErr := mapTunnelError(fmt.Errorf("连接配置已变更，请重试连接"), connID, sshCfg)
+		attachSaveOutcomeToError(appErr, carrier)
+		return "", appErr
+	}
+	stored, err := s.secrets.Get(secretRef)
+	if err != nil {
+		// Preserve existing behavior: missing/unreadable stored secret falls through to SSHAuthPrompt.
+		return "", nil
+	}
+	return stored, nil
 }
 
 // saveRuntimeSSHCredential updates the stored SSH credential & SaveCredential=true metadata
