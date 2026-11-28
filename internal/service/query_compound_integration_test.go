@@ -211,8 +211,6 @@ func TestRealDBCompoundStatementsAndAndChain(t *testing.T) {
 	ctx := context.Background()
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
 
-	connSvc, querySvc, _ := newQueryCompoundTestStack(t)
-
 	// --- 1. PostgreSQL 16: BEGIN ATOMIC function + END/ROLLBACK AND CHAIN session state ---
 	t.Run("Postgres16_BeginAtomic_And_EndAndChain", func(t *testing.T) {
 		var pgTarget realDBTarget
@@ -226,12 +224,23 @@ func TestRealDBCompoundStatementsAndAndChain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("connect pg superuser: %v", err)
 		}
-		t.Cleanup(func() { _ = adminConn.Close(context.Background()) })
+		t.Cleanup(func() {
+			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = adminConn.Close(cctx)
+		})
 
 		schemaName := "cs_pg_" + suffix
 		t.Cleanup(func() {
-			_, _ = adminConn.Exec(context.Background(), fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schemaName))
+			cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, derr := adminConn.Exec(cctx, fmt.Sprintf(`DROP SCHEMA IF EXISTS %s CASCADE`, schemaName)); derr != nil {
+				t.Errorf("cleanup DROP SCHEMA %s failed: %v", schemaName, derr)
+			}
 		})
+		// Register query stack AFTER fixture-drop cleanup so LIFO closes all query tabs BEFORE DROP SCHEMA!
+		connSvc, querySvc, _ := newQueryCompoundTestStack(t)
+
 		for _, q := range []string{
 			fmt.Sprintf(`CREATE SCHEMA %s`, schemaName),
 			fmt.Sprintf(`CREATE TABLE %s.items (id INT PRIMARY KEY, tag TEXT)`, schemaName),
@@ -350,7 +359,8 @@ END`, schemaName, schemaName)
 			if err != nil {
 				t.Fatalf("open root db: %v", err)
 			}
-			// Register Close FIRST so LIFO t.Cleanup executes DROP statements BEFORE closing adminDB!
+			// Register Close FIRST, then bounded DROP, then query stack so LIFO runs:
+			// 1. close query tabs/sessions -> 2. DROP fixtures -> 3. close adminDB.
 			t.Cleanup(func() { _ = adminDB.Close() })
 
 			tbl := "cs_tbl_" + suffix
@@ -359,22 +369,26 @@ END`, schemaName, schemaName)
 			procBtName := "cs_proc_bt_" + suffix
 			eventName := "cs_ev_" + suffix
 			t.Cleanup(func() {
-				if _, derr := adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP EVENT IF EXISTS `%s`", eventName)); derr != nil {
+				cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP EVENT IF EXISTS `%s`", eventName)); derr != nil {
 					t.Errorf("cleanup DROP EVENT %s failed: %v", eventName, derr)
 				}
-				if _, derr := adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procBtName)); derr != nil {
+				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procBtName)); derr != nil {
 					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procBtName, derr)
 				}
-				if _, derr := adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procExecName)); derr != nil {
+				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procExecName)); derr != nil {
 					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procExecName, derr)
 				}
-				if _, derr := adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procName)); derr != nil {
+				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP PROCEDURE IF EXISTS `%s`", procName)); derr != nil {
 					t.Errorf("cleanup DROP PROCEDURE %s failed: %v", procName, derr)
 				}
-				if _, derr := adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl)); derr != nil {
+				if _, derr := adminDB.ExecContext(cctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tbl)); derr != nil {
 					t.Errorf("cleanup DROP TABLE %s failed: %v", tbl, derr)
 				}
 			})
+			connSvc, querySvc, _ := newQueryCompoundTestStack(t)
+
 			if _, err := adminDB.ExecContext(ctx, fmt.Sprintf("CREATE TABLE `%s` (id INT PRIMARY KEY, tag VARCHAR(32), `end` INT NOT NULL DEFAULT 0) ENGINE=InnoDB", tbl)); err != nil {
 				t.Fatalf("create %s: %v", tbl, err)
 			}

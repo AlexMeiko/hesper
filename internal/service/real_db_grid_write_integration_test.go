@@ -104,16 +104,19 @@ const (
 //   - COMMIT stall: enters blackhole mode BEFORE forwarding COMMIT, invokes onTrigger, and stalls replies.
 //   - ROLLBACK stall: enters blackhole mode BEFORE forwarding ROLLBACK and stalls replies.
 type commitDropProxy struct {
-	host          string
-	port          int
-	backend       string
-	engine        dto.EngineType
-	ln            net.Listener
-	mu            sync.Mutex
-	action        proxyAction
-	onTrigger     func()
-	activeConn    []net.Conn
-	stallTimedOut atomic.Bool
+	host                string
+	port                int
+	backend             string
+	engine              dto.EngineType
+	ln                  net.Listener
+	mu                  sync.Mutex
+	closed              bool
+	action              proxyAction
+	onTrigger           func()
+	activeConn          []net.Conn
+	wg                  sync.WaitGroup
+	stallTimedOut       atomic.Bool
+	rollbackIntercepted atomic.Bool
 }
 
 func startCommitDropProxy(t *testing.T, backendAddr string, engine dto.EngineType) *commitDropProxy {
@@ -133,13 +136,19 @@ func startCommitDropProxy(t *testing.T, backendAddr string, engine dto.EngineTyp
 	}
 	t.Cleanup(func() { px.Close() })
 
+	px.wg.Add(1)
 	go func() {
+		defer px.wg.Done()
 		for {
 			clientConn, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			go px.handleConn(clientConn)
+			px.wg.Add(1)
+			go func(c net.Conn) {
+				defer px.wg.Done()
+				px.handleConn(c)
+			}(clientConn)
 		}
 	}()
 	return px
@@ -166,6 +175,7 @@ func (p *commitDropProxy) ArmNextCommitStall(fn func()) {
 
 func (p *commitDropProxy) ArmNextRollbackStall() {
 	p.stallTimedOut.Store(false)
+	p.rollbackIntercepted.Store(false)
 	p.mu.Lock()
 	p.action = proxyActionStallRollback
 	p.onTrigger = nil
@@ -180,6 +190,10 @@ func (p *commitDropProxy) isArmed() bool {
 
 func (p *commitDropProxy) StallTimedOut() bool {
 	return p.stallTimedOut.Load()
+}
+
+func (p *commitDropProxy) RollbackIntercepted() bool {
+	return p.rollbackIntercepted.Load()
 }
 
 func (p *commitDropProxy) consumeActionForFrame(frame []byte) (proxyAction, func()) {
@@ -210,6 +224,7 @@ func (p *commitDropProxy) consumeActionForFrame(frame []byte) (proxyAction, func
 		}
 		p.action = proxyActionNone
 		p.onTrigger = nil
+		p.rollbackIntercepted.Store(true)
 		return proxyActionStallRollback, nil
 	default:
 		return proxyActionNone, nil
@@ -217,19 +232,32 @@ func (p *commitDropProxy) consumeActionForFrame(frame []byte) (proxyAction, func
 }
 
 func (p *commitDropProxy) Close() {
-	_ = p.ln.Close()
 	p.mu.Lock()
-	for _, c := range p.activeConn {
-		_ = c.Close()
+	if p.closed {
+		p.mu.Unlock()
+		return
 	}
+	p.closed = true
+	conns := p.activeConn
 	p.activeConn = nil
 	p.mu.Unlock()
+
+	_ = p.ln.Close()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	p.wg.Wait()
 }
 
-func (p *commitDropProxy) track(c net.Conn) {
+func (p *commitDropProxy) track(c net.Conn) bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		_ = c.Close()
+		return false
+	}
 	p.activeConn = append(p.activeConn, c)
-	p.mu.Unlock()
+	return true
 }
 
 // nextPlaintextFrame extracts one complete MySQL/MariaDB or PostgreSQL plaintext client message
@@ -316,16 +344,22 @@ func extractWireSQLCommand(engine dto.EngineType, frame []byte) string {
 }
 
 func (p *commitDropProxy) handleConn(clientConn net.Conn) {
+	if !p.track(clientConn) {
+		return
+	}
 	serverConn, err := net.DialTimeout("tcp", p.backend, 5*time.Second)
 	if err != nil {
 		_ = clientConn.Close()
 		return
 	}
-	p.track(clientConn)
-	p.track(serverConn)
+	if !p.track(serverConn) {
+		_ = clientConn.Close()
+		return
+	}
 
 	dropCh := make(chan struct{}, 1)
 	serverDone := make(chan struct{})
+	clientDone := make(chan struct{})
 	var dropping atomic.Bool
 	var stalling atomic.Bool
 	var once sync.Once
@@ -335,9 +369,14 @@ func (p *commitDropProxy) handleConn(clientConn net.Conn) {
 			_ = serverConn.Close()
 		})
 	}
+	defer func() {
+		closeBoth()
+		<-clientDone
+	}()
 
 	// Client -> Server
 	go func() {
+		defer close(clientDone)
 		defer closeBoth()
 		buf := make([]byte, 16*1024)
 		var pending []byte
@@ -1006,6 +1045,171 @@ func TestRealDBGridWrite_MySQL84AndMariaDB114(t *testing.T) {
 				t.Fatalf("expected original DECIMAL value '2' preserved after rejected Note 1265 update, got %q", gotDecAmt)
 			}
 
+			// 8d. max_error_count=0 under non-strict sql_mode omits SHOW WARNINGS rows -> SHOW COUNT(*) WARNINGS MUST still reject!
+			//     Also verify altering ONLY a generated column's GENERATION_EXPRESSION invalidates the schema fingerprint!
+			func() {
+				var savedMaxErr int
+				if err := rootDB.QueryRowContext(ctx, "SELECT @@GLOBAL.max_error_count").Scan(&savedMaxErr); err != nil {
+					t.Fatalf("read @@GLOBAL.max_error_count: %v", err)
+				}
+				if _, err := rootDB.ExecContext(ctx, "SET GLOBAL sql_mode = '', GLOBAL max_error_count = 0"); err != nil {
+					t.Fatalf("set GLOBAL sql_mode='', max_error_count=0: %v", err)
+				}
+				defer func() {
+					if _, rerr := rootDB.ExecContext(context.Background(), "SET GLOBAL sql_mode = ?, GLOBAL max_error_count = ?", savedGlobalSQLMode, savedMaxErr); rerr != nil {
+						t.Errorf("restore GLOBAL sql_mode/max_error_count failed: %v", rerr)
+					}
+				}()
+
+				prevOmit, err := stack.changeSvc.PreviewGridChanges(ctx, dto.PreviewGridChangesRequest{
+					ConnectionID: conn.ID, Database: "sqlm_write_test", Table: tblNonStrict,
+					Inserts: []dto.GridRowInsert{{
+						RowKey: "ins-max-err-0",
+						Values: map[string]dto.NewCellValue{
+							"id": {Mode: dto.CellInputLiteral, Text: "9"},
+							"s":  {Mode: dto.CellInputLiteral, Text: "abcd"},
+						},
+					}},
+				})
+				if err != nil {
+					t.Fatalf("preview max_error_count=0 insert: %v", err)
+				}
+				respOmit, errOmit := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{
+					ConnectionID: conn.ID, PlanID: prevOmit.PlanID,
+				})
+				assertApplyOutcome(t, respOmit, errOmit, dto.GridApplyNotCommitted, dto.ErrInvalidArgument)
+
+				var omitCnt int
+				if err := adminDB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE id = 9", tblNonStrict)).Scan(&omitCnt); err != nil {
+					t.Fatalf("count %s id=9: %v", tblNonStrict, err)
+				}
+				if omitCnt != 0 {
+					t.Fatalf("expected 0 rows for id=9 when max_error_count=0 omitted warning details, got %d", omitCnt)
+				}
+			}()
+
+			// 8e. GLOBAL sql_notes=0 would suppress Note 1265 count unless BeginTableWrite enables
+			//     SET SESSION sql_notes = 1 on the dedicated write connection -> DECIMAL(10,0) 2.5 MUST still reject!
+			func() {
+				var savedSQLNotes int
+				if err := rootDB.QueryRowContext(ctx, "SELECT @@GLOBAL.sql_notes").Scan(&savedSQLNotes); err != nil {
+					t.Fatalf("read @@GLOBAL.sql_notes: %v", err)
+				}
+				if _, err := rootDB.ExecContext(ctx, "SET GLOBAL sql_notes = 0"); err != nil {
+					t.Fatalf("set GLOBAL sql_notes=0: %v", err)
+				}
+				defer func() {
+					if _, rerr := rootDB.ExecContext(context.Background(), "SET GLOBAL sql_notes = ?", savedSQLNotes); rerr != nil {
+						t.Errorf("restore GLOBAL sql_notes failed: %v", rerr)
+					}
+				}()
+
+				prevNotesOff, err := stack.changeSvc.PreviewGridChanges(ctx, dto.PreviewGridChangesRequest{
+					ConnectionID: conn.ID, Database: "sqlm_write_test", Table: tblDecRound,
+					Inserts: []dto.GridRowInsert{{
+						RowKey: "ins-dec-sql-notes-0",
+						Values: map[string]dto.NewCellValue{
+							"id":  {Mode: dto.CellInputLiteral, Text: "3"},
+							"amt": {Mode: dto.CellInputLiteral, Text: "2.5"},
+						},
+					}},
+				})
+				if err != nil {
+					t.Fatalf("preview DECIMAL(10,0) insert under GLOBAL sql_notes=0: %v", err)
+				}
+				respNotesOff, errNotesOff := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{
+					ConnectionID: conn.ID, PlanID: prevNotesOff.PlanID,
+				})
+				assertApplyOutcome(t, respNotesOff, errNotesOff, dto.GridApplyNotCommitted, dto.ErrInvalidArgument)
+				if !strings.Contains(respNotesOff.Error.Error(), "1265") {
+					t.Fatalf("expected Note 1265 rejection under GLOBAL sql_notes=0, got %v", respNotesOff.Error)
+				}
+
+				var notesOffCnt int
+				if err := adminDB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE id = 3", tblDecRound)).Scan(&notesOffCnt); err != nil {
+					t.Fatalf("count %s id=3: %v", tblDecRound, err)
+				}
+				if notesOffCnt != 0 {
+					t.Fatalf("expected 0 rows for id=3 when GLOBAL sql_notes=0, got %d", notesOffCnt)
+				}
+			}()
+
+			// 8f. MariaDB 11.4 independent switch: GLOBAL note_verbosity='' suppresses Note 1265 even
+			//     when sql_notes=1 unless BeginTableWrite enables SESSION note_verbosity='basic'.
+			if target.engine == dto.EngineMariaDB {
+				func() {
+					var savedNoteVerbosity string
+					if err := rootDB.QueryRowContext(ctx, "SELECT @@GLOBAL.note_verbosity").Scan(&savedNoteVerbosity); err != nil {
+						t.Fatalf("read @@GLOBAL.note_verbosity: %v", err)
+					}
+					if _, err := rootDB.ExecContext(ctx, "SET GLOBAL note_verbosity = ''"); err != nil {
+						t.Fatalf("set GLOBAL note_verbosity='': %v", err)
+					}
+					defer func() {
+						if _, rerr := rootDB.ExecContext(context.Background(), "SET GLOBAL note_verbosity = ?", savedNoteVerbosity); rerr != nil {
+							t.Errorf("restore GLOBAL note_verbosity failed: %v", rerr)
+						}
+					}()
+
+					prevNVOff, err := stack.changeSvc.PreviewGridChanges(ctx, dto.PreviewGridChangesRequest{
+						ConnectionID: conn.ID, Database: "sqlm_write_test", Table: tblDecRound,
+						Inserts: []dto.GridRowInsert{{
+							RowKey: "ins-dec-note-verbosity-empty",
+							Values: map[string]dto.NewCellValue{
+								"id":  {Mode: dto.CellInputLiteral, Text: "4"},
+								"amt": {Mode: dto.CellInputLiteral, Text: "2.5"},
+							},
+						}},
+					})
+					if err != nil {
+						t.Fatalf("preview DECIMAL(10,0) insert under GLOBAL note_verbosity='': %v", err)
+					}
+					respNVOff, errNVOff := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{
+						ConnectionID: conn.ID, PlanID: prevNVOff.PlanID,
+					})
+					assertApplyOutcome(t, respNVOff, errNVOff, dto.GridApplyNotCommitted, dto.ErrInvalidArgument)
+					if !strings.Contains(respNVOff.Error.Error(), "1265") {
+						t.Fatalf("expected Note 1265 rejection under GLOBAL note_verbosity='', got %v", respNVOff.Error)
+					}
+
+					var nvOffCnt int
+					if err := adminDB.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE id = 4", tblDecRound)).Scan(&nvOffCnt); err != nil {
+						t.Fatalf("count %s id=4: %v", tblDecRound, err)
+					}
+					if nvOffCnt != 0 {
+						t.Fatalf("expected 0 rows for id=4 when GLOBAL note_verbosity='', got %d", nvOffCnt)
+					}
+				}()
+			}
+
+			tblGenExpr := "gw_gen_expr_" + suffix
+			t.Cleanup(func() {
+				_, _ = adminDB.ExecContext(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS `%s`", tblGenExpr))
+			})
+			if _, err := adminDB.ExecContext(ctx, fmt.Sprintf("CREATE TABLE `%s` (id INT PRIMARY KEY, qty INT NOT NULL, doubled INT GENERATED ALWAYS AS (qty * 2) VIRTUAL) ENGINE=InnoDB", tblGenExpr)); err != nil {
+				t.Fatalf("create %s: %v", tblGenExpr, err)
+			}
+			prevGenDrift, err := stack.changeSvc.PreviewGridChanges(ctx, dto.PreviewGridChangesRequest{
+				ConnectionID: conn.ID, Database: "sqlm_write_test", Table: tblGenExpr,
+				Inserts: []dto.GridRowInsert{{
+					RowKey: "ins-gen-drift",
+					Values: map[string]dto.NewCellValue{
+						"id":  {Mode: dto.CellInputLiteral, Text: "1"},
+						"qty": {Mode: dto.CellInputLiteral, Text: "5"},
+					},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("preview generated expression drift: %v", err)
+			}
+			if _, err := adminDB.ExecContext(ctx, fmt.Sprintf("ALTER TABLE `%s` MODIFY COLUMN doubled INT GENERATED ALWAYS AS (qty * 3) VIRTUAL", tblGenExpr)); err != nil {
+				t.Fatalf("ALTER generated expression on %s: %v", tblGenExpr, err)
+			}
+			respGenDrift, errGenDrift := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{
+				ConnectionID: conn.ID, PlanID: prevGenDrift.PlanID,
+			})
+			assertApplyOutcome(t, respGenDrift, errGenDrift, dto.GridApplyNotCommitted, dto.ErrSchemaChanged)
+
 			// 9. COMMIT partial-response disconnect via real proxy -> GridApplyUnknown (RetrySafe=false) & anti-replay!
 			px := startCommitDropProxy(t, net.JoinHostPort(target.host, strconv.Itoa(target.port)), target.engine)
 			proxyConn, err := stack.connSvc.SaveConnection(ctx, dto.SaveConnectionRequest{
@@ -1098,6 +1302,9 @@ func TestRealDBGridWrite_MySQL84AndMariaDB114(t *testing.T) {
 			rbErr := rbTx.Rollback(rbShortCtx)
 			rbCancel()
 			rbLease.Release()
+			if !px.RollbackIntercepted() {
+				t.Fatalf("expected proxy to intercept ROLLBACK frame before timeout")
+			}
 			if px.StallTimedOut() {
 				t.Fatalf("proxy watchdog fired after 3s: hung MySQL ROLLBACK failed to respect ctx deadline")
 			}
@@ -1266,11 +1473,14 @@ func TestRealDBGridWrite_MySQL84AndMariaDB114(t *testing.T) {
 				if err != nil {
 					t.Fatalf("preview ssh drop: %v", err)
 				}
-				px.ArmNextCommitWith(func() { sshSrv.KillAllConnections() })
+				px.ArmNextCommitStall(func() { sshSrv.KillAllConnections() })
 				sshDropResp, sshDropErr := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{
 					ConnectionID: sshPlainConn.ID,
 					PlanID:       prevSSHDrop.PlanID,
 				})
+				if px.StallTimedOut() {
+					t.Fatalf("proxy watchdog fired after 3s: SSH tunnel loss failed to unblock Apply")
+				}
 				assertApplyOutcome(t, sshDropResp, sshDropErr, dto.GridApplyUnknown, dto.ErrCommitOutcomeUnknown)
 				if sshDropResp.Error.RetrySafe {
 					t.Fatalf("expected RetrySafe=false on MySQL SSH tunnel drop during COMMIT, got %+v", sshDropResp.Error)
@@ -1618,8 +1828,9 @@ func TestRealDBGridWrite_Postgres16(t *testing.T) {
 	}
 	resDef, errDef := stack.changeSvc.ApplyGridChanges(ctx, dto.ApplyGridChangesRequest{ConnectionID: conn.ID, PlanID: prevDef.PlanID})
 	assertApplyOutcome(t, resDef, errDef, dto.GridApplyNotCommitted, "")
-	if resDef.Error == nil || resDef.Error.Code == dto.ErrCommitOutcomeUnknown {
-		t.Fatalf("DEFERRABLE constraint violation MUST be NotCommitted with non-Unknown error, got %+v", resDef)
+	if resDef.Error == nil || resDef.Error.Code == dto.ErrCommitOutcomeUnknown ||
+		!strings.Contains(resDef.Error.Error(), "23505") || !strings.Contains(resDef.Error.Error(), "uq_def_code") {
+		t.Fatalf("DEFERRABLE constraint violation MUST be NotCommitted with SQLSTATE 23505 (uq_def_code), got %+v", resDef)
 	}
 
 	// 3b. Legacy INHERITS parent MUST NOT grant PK/UNIQUE row identity (parent + child can share id=7),
@@ -1962,14 +2173,20 @@ func TestCommitDropProxySplitReadFraming(t *testing.T) {
 
 	reply := make([]byte, 16)
 	totalRead := 0
+	var lastErr error
 	for {
 		n, rerr := cli.Read(reply[totalRead:])
 		totalRead += n
 		if rerr != nil {
+			lastErr = rerr
 			break
 		}
 	}
-	if totalRead != 1 {
-		t.Fatalf("expected exactly 1 partial response byte before drop, got %d bytes (%x)", totalRead, reply[:totalRead])
+	var ne net.Error
+	if errors.As(lastErr, &ne) && ne.Timeout() {
+		t.Fatalf("expected immediate disconnect after 1 partial byte, got read timeout: %v", lastErr)
+	}
+	if totalRead != 1 || reply[0] != 0x07 {
+		t.Fatalf("expected exactly 1 partial response byte (0x07) before drop, got %d bytes (%x) err=%v", totalRead, reply[:totalRead], lastErr)
 	}
 }
