@@ -1218,6 +1218,29 @@ SELECT 5;`
 		if !sawFooTag {
 			t.Fatalf("expected identifier foo$é$ to remain intact in tokenizeSQL, got %+v", tokenizeSQL(stmts[1].Text, DialectPostgres))
 		}
+		// Combining mark (U+0301) and non-ASCII high-bit bytes inside PostgreSQL identifiers must be consumed
+		// as identifier characters so an internal $é$ is never mistaken for an unclosed dollar quote.
+		for _, tc := range []struct {
+			sql       string
+			wantIdent string
+		}{
+			{"SELECT 1 AS a\u0301$é$; SELECT 2;", "A\u0301$É$"},
+			{"SELECT 🚀$é$; SELECT 2;", "🚀$É$"},
+		} {
+			s := Split(tc.sql, DialectPostgres)
+			if len(s) != 2 || s[1].Text != "SELECT 2" {
+				t.Fatalf("PG high-bit identifier %q broke Split: %+v", tc.sql, s)
+			}
+			var found bool
+			for _, tok := range tokenizeSQL(s[0].Text, DialectPostgres) {
+				if tok.kind == tokWord && tok.upper == tc.wantIdent {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected intact identifier %q in tokenizeSQL(%q), got %+v", tc.wantIdent, s[0].Text, tokenizeSQL(s[0].Text, DialectPostgres))
+			}
+		}
 	})
 }
 

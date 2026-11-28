@@ -395,12 +395,12 @@ func Split(src string, dialect Dialect) []Statement {
 				}
 			}
 			r, size := utf8.DecodeRuneInString(src[i:])
-			if isIdentStart(r) || (r >= '0' && r <= '9') {
+			if isDialectIdentStart(dialect, r, size) || (r >= '0' && r <= '9') {
 				start := i
 				i += size
 				for i < n {
 					nr, nsize := utf8.DecodeRuneInString(src[i:])
-					if isIdentPart(nr) || nr == '$' {
+					if isDialectIdentPart(dialect, nr, nsize) || nr == '$' {
 						i += nsize
 						continue
 					}
@@ -664,12 +664,12 @@ func tokenizeSQL(s string, dialect Dialect) []sqlToken {
 		}
 
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if isIdentStart(r) || (r >= '0' && r <= '9') {
+		if isDialectIdentStart(dialect, r, size) || (r >= '0' && r <= '9') {
 			start := i
 			i += size
 			for i < n {
 				nr, nsize := utf8.DecodeRuneInString(s[i:])
-				if isIdentPart(nr) || nr == '$' {
+				if isDialectIdentPart(dialect, nr, nsize) || nr == '$' {
 					i += nsize
 					continue
 				}
@@ -1255,6 +1255,20 @@ func isPGDollarTagPart(r rune, size int) bool {
 func isIdentStart(r rune) bool { return r == '_' || unicode.IsLetter(r) }
 func isIdentPart(r rune) bool  { return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) }
 
+func isDialectIdentStart(dialect Dialect, r rune, size int) bool {
+	if dialect == DialectPostgres {
+		return isPGDollarTagStart(r, size)
+	}
+	return isIdentStart(r)
+}
+
+func isDialectIdentPart(dialect Dialect, r rune, size int) bool {
+	if dialect == DialectPostgres {
+		return isPGDollarTagPart(r, size)
+	}
+	return isIdentPart(r)
+}
+
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
 }
@@ -1354,7 +1368,7 @@ func stripCommentsAndStrings(s string, dialect Dialect) string {
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
 		b.WriteString(s[i : i+size])
-		prevWasIdent = isIdentPart(r) || r == '$'
+		prevWasIdent = isDialectIdentPart(dialect, r, size) || r == '$'
 		i += size
 	}
 	return b.String()
